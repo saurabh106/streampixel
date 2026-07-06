@@ -1,0 +1,32 @@
+{
+  "name": "streampixel-monorepo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "SaaS Platform Foundation for Unreal Engine Pixel Streaming",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "concurrently -n \"shared,backend,frontend\" -c \"cyan,green,blue\" \"npm run dev --workspace=packages/shared\" \"npm run dev --workspace=apps/backend\" \"npm run dev --workspace=apps/frontend\"",
+    "build": "npm run build --workspace=packages/shared && npm run build --workspace=apps/backend && npm run build --workspace=apps/frontend",
+    "lint": "eslint \"{apps,packages}/**/*.{ts,tsx,js,jsx}\"",
+    "format": "prettier --write \"{apps,packages}/**/*.{ts,tsx,js,jsx,json,md}\" --ignore-path .gitignore",
+    "type-check": "npm run type-check --workspace=packages/shared && npm run type-check --workspace=apps/backend && npm run type-check --workspace=apps/frontend",
+    "db:migrate": "npm run db:migrate --workspace=apps/backend",
+    "db:generate": "npm run db:generate --workspace=apps/backend",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "@typescript-eslint/eslint-plugin": "^7.15.0",
+    "@typescript-eslint/parser": "^7.15.0",
+    "concurrently": "^8.2.2",
+    "eslint": "^8.57.0",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.1.3",
+    "husky": "^9.0.11",
+    "lint-staged": "^15.2.7",
+    "prettier": "^3.3.2",
+    "typescript": "^5.5.2"
+  }
+}

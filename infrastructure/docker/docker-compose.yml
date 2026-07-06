@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  postgres_db:
+    image: postgres:16-alpine
+    container_name: streampixel_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres_password
+      POSTGRES_DB: streampixel
+    ports:
+      - '5433:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build:
+      context: ../../
+      dockerfile: apps/backend/Dockerfile
+      target: development
+    container_name: streampixel_backend
+    restart: always
+    ports:
+      - '5000:5000'
+    volumes:
+      - ../../:/app
+      - /app/node_modules
+      - /app/apps/backend/node_modules
+    env_file:
+      - ../../.env.development
+    depends_on:
+      postgres_db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ../../
+      dockerfile: apps/frontend/Dockerfile
+      target: development
+    container_name: streampixel_frontend
+    restart: always
+    ports:
+      - '3000:3000'
+    volumes:
+      - ../../:/app
+      - /app/node_modules
+      - /app/apps/frontend/node_modules
+      - /app/apps/frontend/.next
+    env_file:
+      - ../../.env.development
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
