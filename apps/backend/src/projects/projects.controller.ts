@@ -25,13 +25,13 @@ export class ProjectsController {
   constructor(private projectsService: ProjectsService) {}
 
   @Post('upload')
-  @ApiOperation({ summary: 'Upload a new Unreal Engine project build (ZIP)' })
+  @ApiOperation({ summary: 'Upload a new Unreal Engine project build (ZIP/RAR)' })
   @ApiConsumes('multipart/form-data')
   @ApiBody({
     schema: {
       type: 'object',
       properties: {
-        file: { type: 'string', format: 'binary', description: 'Packaged UE Project ZIP' },
+        file: { type: 'string', format: 'binary', description: 'Packaged UE Project ZIP or RAR archive' },
         name: { type: 'string', description: 'Project Name' },
         version: { type: 'string', description: 'Unreal Engine version (e.g. UE 5.4)' },
       },
@@ -52,7 +52,7 @@ export class ProjectsController {
     @GetUser() user: UserDto,
   ) {
     if (!file) {
-      throw new BadRequestException('Unreal Engine project ZIP file is required');
+      throw new BadRequestException('Unreal Engine project ZIP or RAR file is required');
     }
     if (!name || !version) {
       throw new BadRequestException('Project name and engine version are required');

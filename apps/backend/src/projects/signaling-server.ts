@@ -40,17 +40,21 @@ export class SignalingServer {
         ws.send(JSON.stringify(configMsg));
         this.logger.log(`Sent WebRTC config to player ${playerId}`);
 
-        // Notify streamer
+        // Notify streamer with a small delay to ensure UE plugin is ready
         if (this.streamer && this.streamer.readyState === WebSocket.OPEN) {
-          this.streamer.send(
-            JSON.stringify({
-              type: 'playerConnected',
-              playerId: playerId,
-              dataChannel: true,
-              sfu: false,
-            }),
-          );
-          this.logger.log(`Notified streamer that player ${playerId} connected`);
+          setTimeout(() => {
+            if (this.streamer && this.streamer.readyState === WebSocket.OPEN) {
+              const playerMsg = JSON.stringify({
+                type: 'playerConnected',
+                playerId: playerId,
+                dataChannel: true,
+              });
+              this.streamer.send(playerMsg);
+              this.logger.log(`Notified streamer that player ${playerId} connected (delayed)`);
+            }
+          }, 1000);
+        } else {
+          this.logger.log(`Player ${playerId} connected but no streamer present yet`);
         }
       };
 
@@ -62,21 +66,25 @@ export class SignalingServer {
         this.streamer = ws;
         this.logger.log(`Streamer registered on port ${port}`);
 
-        // Notify streamer of all existing players
-        this.players.forEach((player) => {
-          const pId = (player as any).playerId;
-          if (this.streamer && this.streamer.readyState === WebSocket.OPEN) {
-            this.streamer.send(
-              JSON.stringify({
-                type: 'playerConnected',
-                playerId: pId,
-                dataChannel: true,
-                sfu: false,
-              }),
-            );
-            this.logger.log(`Notified streamer of existing player ${pId}`);
-          }
-        });
+        // Notify streamer of existing players after a brief delay
+        // so the UE plugin has time to initialize its message handlers
+        if (this.players.size > 0) {
+          const playerList = Array.from(this.players);
+          setTimeout(() => {
+            playerList.forEach((player) => {
+              const pId = (player as any).playerId;
+              if (this.streamer && this.streamer.readyState === WebSocket.OPEN) {
+                const playerMsg = JSON.stringify({
+                  type: 'playerConnected',
+                  playerId: pId,
+                  dataChannel: true,
+                });
+                this.streamer.send(playerMsg);
+                this.logger.log(`Notified streamer of existing player ${pId} (delayed)`);
+              }
+            });
+          }, 2000);
+        }
       };
 
       // Check URL path to identify role immediately
@@ -151,7 +159,15 @@ export class SignalingServer {
   private handleMessage(sender: WebSocket, parsed: any, raw: string) {
     const senderId = (sender as any).playerId;
 
+    // Handle ping/pong keepalive
+    if (parsed.type === 'ping') {
+      this.logger.debug(`Responding to ping from ${sender === this.streamer ? 'streamer' : `player ${senderId}`}`);
+      sender.send(JSON.stringify({ type: 'pong' }));
+      return;
+    }
+
     if (sender === this.streamer) {
+      this.logger.log(`Streamer → type=${parsed.type} playerId=${parsed.playerId || '*'}`);
       // Message from Streamer to Player(s)
       if (parsed.playerId) {
         // Direct message to a specific player
@@ -160,17 +176,33 @@ export class SignalingServer {
         );
         if (target && target.readyState === WebSocket.OPEN) {
           target.send(raw);
+          this.logger.log(`Forwarded ${parsed.type} → player ${parsed.playerId}`);
+        } else {
+          this.logger.warn(`Target player ${parsed.playerId} not found for streamer message`);
         }
-      } else {
+      } else if (parsed.type === 'offer') {
+        // Offer without playerId → send to first available player
+        if (this.players.size > 0) {
+          const firstPlayer = Array.from(this.players)[0];
+          const pId = (firstPlayer as any).playerId;
+          parsed.playerId = pId;
+          firstPlayer.send(JSON.stringify(parsed));
+          this.logger.log(`Forwarded offer → first player ${pId}`);
+        }
+      } else if (parsed.type !== 'pong') {
         // Broadcast to all players
         this.broadcastToPlayers(raw);
+        this.logger.log(`Broadcasted ${parsed.type} → ${this.players.size} players`);
       }
     } else {
+      this.logger.log(`Player ${senderId} → type=${parsed.type}`);
       // Message from Player to Streamer
       if (this.streamer && this.streamer.readyState === WebSocket.OPEN) {
         // Attach player ID so streamer knows where it came from
         parsed.playerId = senderId;
-        this.streamer.send(JSON.stringify(parsed));
+        const msgStr = JSON.stringify(parsed);
+        this.streamer.send(msgStr);
+        this.logger.log(`Forwarded ${parsed.type} → streamer`);
       } else {
         this.logger.warn(`No streamer connected on port ${this.port} to receive player message`);
       }
@@ -179,12 +211,16 @@ export class SignalingServer {
 
   private forwardRawMessage(sender: WebSocket, message: WebSocket.Data) {
     if (sender === this.streamer) {
+      const byteLen = typeof message === 'string' ? message.length : (message as any).byteLength || (message as any).length || 0;
+      this.logger.debug(`Forwarding binary message (${byteLen}B) from streamer to ${this.players.size} players`);
       this.players.forEach((player) => {
         if (player.readyState === WebSocket.OPEN) {
           player.send(message);
         }
       });
     } else if (this.streamer && this.streamer.readyState === WebSocket.OPEN) {
+      const byteLen = typeof message === 'string' ? message.length : (message as any).byteLength || (message as any).length || 0;
+      this.logger.debug(`Forwarding binary message (${byteLen}B) from player to streamer`);
       this.streamer.send(message);
     }
   }

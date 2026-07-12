@@ -38,6 +38,8 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+logs/
+*.log
 
 # Prisma
 /apps/backend/prisma/dev.db

@@ -51,6 +51,8 @@ model Project {
   instances      Instance[]
   createdAt      DateTime   @default(now())
   updatedAt      DateTime   @updatedAt
+  shareSlug      String?    @unique
+  maxCCU         Int        @default(3)
 
   @@map("projects")
 }

@@ -1,0 +1,2 @@
+-- AlterTable
+ALTER TABLE "projects" ADD COLUMN "maxCCU" INTEGER NOT NULL DEFAULT 3;

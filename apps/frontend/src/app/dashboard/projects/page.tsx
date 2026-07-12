@@ -318,6 +318,20 @@ export default function ProjectsPage() {
                             <Play className="w-4 h-4 fill-current" />
                           </button>
                         )}
+                        {project.shareSlug && (
+                          <button
+                            onClick={() => {
+                              const origin =
+                                typeof window !== 'undefined' ? window.location.origin : '';
+                              navigator.clipboard.writeText(`${origin}/watch/${project.shareSlug}`);
+                              alert('Share link copied to clipboard!');
+                            }}
+                            title="Copy Public Share Link"
+                            className="p-2 hover:bg-indigo-500/10 text-slate-400 hover:text-indigo-400 rounded-lg transition-all"
+                          >
+                            <ExternalLink className="w-4 h-4" />
+                          </button>
+                        )}
                         <button
                           onClick={() => deleteProject(project.id)}
                           title="Delete Project"
@@ -342,7 +356,9 @@ export default function ProjectsPage() {
             {/* Header */}
             <div className="p-5 border-b border-slate-900 flex items-center justify-between">
               <div>
-                <h3 className="text-lg font-bold text-white">Upload UE Build Folder (.zip, .rar)</h3>
+                <h3 className="text-lg font-bold text-white">
+                  Upload UE Build Folder (.zip, .rar)
+                </h3>
                 <p className="text-xs text-slate-400 mt-0.5">
                   Package your build folder as a single ZIP or RAR archive to upload.
                 </p>
@@ -397,7 +413,9 @@ export default function ProjectsPage() {
               </div>
 
               <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-300">ZIP or RAR Build Archive</label>
+                <label className="text-xs font-semibold text-slate-300">
+                  ZIP or RAR Build Archive
+                </label>
                 <div className="border border-dashed border-slate-800 rounded-xl p-6 text-center bg-[#070913]/40 hover:border-indigo-500/30 transition-colors relative flex flex-col items-center justify-center">
                   <input
                     type="file"
