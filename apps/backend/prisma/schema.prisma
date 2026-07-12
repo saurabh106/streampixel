@@ -58,15 +58,19 @@ model Project {
 }
 
 model Instance {
-  id         String   @id @default(uuid())
-  projectId  String
-  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  port       Int
-  status     String   @default("STARTING") // "STARTING", "RUNNING", "STOPPED", "ERROR"
-  pid        Int?
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id             String   @id @default(uuid())
+  projectId      String
+  project        Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  port           Int
+  status         String   @default("STARTING") // "STARTING", "RUNNING", "STOPPED", "ERROR"
+  pid            Int?
+  viewerId       String?
+  viewportWidth  Int?
+  viewportHeight Int?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 
+  @@unique([projectId, viewerId])
   @@map("instances")
 }
 

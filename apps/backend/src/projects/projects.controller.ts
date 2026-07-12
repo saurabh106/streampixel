@@ -41,7 +41,7 @@ export class ProjectsController {
   @UseInterceptors(
     FileInterceptor('file', {
       limits: {
-        fileSize: 2 * 1024 * 1024 * 1024, // 2 GB
+        fileSize: 100 * 1024 * 1024 * 1024, // 100 GB
       },
     }),
   )
@@ -85,8 +85,12 @@ export class ProjectsController {
   }
 
   @Post(':id/stop')
-  @ApiOperation({ summary: 'Stop the running instance for this project' })
-  async stopInstance(@Param('id') id: string, @GetUser() user: UserDto) {
-    return this.projectsService.stopInstance(id, user.id);
+  @ApiOperation({ summary: 'Stop the running instance(s) for this project' })
+  async stopInstance(
+    @Param('id') id: string,
+    @GetUser() user: UserDto,
+    @Body('instanceId') instanceId?: string,
+  ) {
+    return this.projectsService.stopInstance(id, user.id, instanceId);
   }
 }

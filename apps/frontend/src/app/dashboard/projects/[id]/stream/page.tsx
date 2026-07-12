@@ -12,6 +12,7 @@ import {
   Info,
   Link as LinkIcon,
 } from 'lucide-react';
+import { toast } from 'sonner';
 import api from '../../../../../services/api';
 import PixelStreamPlayer from '../../../../../components/PixelStreamPlayer';
 
@@ -71,9 +72,17 @@ export default function StreamPlayerPage() {
 
       // Update local project status
       setProject((prev: any) => ({ ...prev, status: 'RUNNING' }));
+      toast.success('Instance started', {
+        description: res.message || 'UE process is now streaming.',
+      });
     } catch (err: any) {
-      setError(err.message || 'Failed to start project stream');
-      addLog(`Launch Error: ${err.message}`);
+      const msg = err.message || 'Failed to start project stream';
+      setError(msg);
+      addLog(`Launch Error: ${msg}`);
+      toast.error('Failed to start instance', {
+        description: msg,
+        duration: 8000,
+      });
     } finally {
       setLoading(false);
     }
@@ -88,9 +97,14 @@ export default function StreamPlayerPage() {
       addLog('Instance stopped.');
       setProject((prev: any) => ({ ...prev, status: 'STOPPED' }));
       setInstancePort(null);
+      toast.success('Instance stopped');
     } catch (err: any) {
-      setError(err.message || 'Failed to stop stream');
-      addLog(`Stop Error: ${err.message}`);
+      const msg = err.message || 'Failed to stop stream';
+      setError(msg);
+      addLog(`Stop Error: ${msg}`);
+      toast.error('Failed to stop instance', {
+        description: msg,
+      });
     } finally {
       setLoading(false);
     }
@@ -174,9 +188,12 @@ export default function StreamPlayerPage() {
 
       {/* Error Bar */}
       {error && (
-        <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 flex items-center gap-3 text-sm text-red-400">
-          <AlertCircle className="w-5 h-5 shrink-0" />
-          <p>{error}</p>
+        <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 flex items-start gap-3 text-sm text-red-400">
+          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <p className="font-medium text-red-300">Instance Error</p>
+            <p className="text-red-400/80 text-xs leading-relaxed">{error}</p>
+          </div>
         </div>
       )}
 

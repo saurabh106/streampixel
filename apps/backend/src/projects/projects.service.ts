@@ -13,26 +13,37 @@ import { spawn, execSync } from 'child_process';
 import AdmZip from 'adm-zip';
 import { createExtractorFromFile } from 'node-unrar-js';
 
+interface ActiveProcess {
+  projectId: string;
+  signalingProcess?: any;
+  ueProcess?: any;
+  playerPort: number;
+  streamerPort: number;
+  clients: number;
+  ownerId: string;
+  viewerId?: string;
+}
+
 @Injectable()
 export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ProjectsService.name);
+  // Keyed by instanceId (not projectId). Each viewer gets their own dedicated
+  // UE process + Wilbur signaling server, tracked independently.
   // Instance lifecycle is fully decoupled from WebSocket/browser connections.
   // Once started, an instance runs until explicitly stopped via stopInstance().
   // Player count is tracked for display only — zero players never triggers shutdown.
-  private activeProcesses = new Map<
-    string,
-    {
-      signalingProcess?: any;
-      ueProcess?: any;
-      playerPort: number;
-      streamerPort: number;
-      clients: number;
-      ownerId: string;
-    }
-  >();
-  private storagePath = path.resolve(process.cwd(), 'storage');
+  private activeProcesses = new Map<string, ActiveProcess>();
+  // Prevents concurrent spawn calls for the same project (e.g. React StrictMode
+  // double-effect, rapid button clicks). Released once the spawn completes or fails.
+  private spawningProjects = new Set<string>();
+  private storagePath = process.env.STORAGE_PATH || 'G:\\store';
 
   constructor(private prisma: PrismaService) {}
+
+  /** Get all running instances for a given project from the in-memory map. */
+  private getInstancesForProject(projectId: string): Array<[string, ActiveProcess]> {
+    return [...this.activeProcesses.entries()].filter(([, proc]) => proc.projectId === projectId);
+  }
 
   onModuleInit() {
     // Ensure storage folders exist
@@ -82,7 +93,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleDestroy() {
     this.logger.log('Shutting down. Cleaning up all active processes...');
-    for (const [projectId, proc] of this.activeProcesses.entries()) {
+    for (const [, proc] of this.activeProcesses.entries()) {
       if (proc.ueProcess && proc.ueProcess.pid) {
         this.logger.log(`Killing UE process PID ${proc.ueProcess.pid}`);
         this.killProcessTree(proc.ueProcess.pid);
@@ -111,7 +122,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
 
     // Save temporary record to DB
     const shareSlug = Math.random().toString(36).substring(2, 10);
-    const project = await this.prisma.project.create({
+    await this.prisma.project.create({
       data: {
         id: projectId,
         name,
@@ -201,10 +212,11 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     });
 
     return projects.map((p) => {
-      const proc = this.activeProcesses.get(p.id);
+      const instances = this.getInstancesForProject(p.id);
+      const totalClients = instances.reduce((sum, [, proc]) => sum + proc.clients, 0);
       return {
         ...p,
-        clients: proc ? proc.clients : 0,
+        clients: totalClients,
       };
     });
   }
@@ -219,14 +231,22 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException(`Project with ID ${id} not found`);
     }
 
-    const proc = this.activeProcesses.get(project.id);
+    const instances = this.getInstancesForProject(project.id);
+    const totalClients = instances.reduce((sum, [, proc]) => sum + proc.clients, 0);
     return {
       ...project,
-      clients: proc ? proc.clients : 0,
+      clients: totalClients,
     };
   }
 
-  async getByShareSlug(shareSlug: string) {
+  // ─── Public viewer flow ──────────────────────────────────────────────
+
+  async getByShareSlug(
+    shareSlug: string,
+    viewerId: string,
+    viewportWidth: number,
+    viewportHeight: number,
+  ) {
     const project = await this.prisma.project.findUnique({
       where: { shareSlug },
       include: { instances: true },
@@ -236,43 +256,176 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException(`Project not found`);
     }
 
-    // Check if there is already a running instance.
-    // onModuleInit validates instance health at startup and marks dead ones STOPPED,
-    // so any instance still RUNNING in the DB is genuinely alive — no per-request
-    // port probe needed. This keeps the fast path (instance already running) down to
-    // a single DB query with no network I/O.
-    const activeInstance = project.instances?.find((i) => i.status === 'RUNNING');
-    if (activeInstance) {
-      return {
-        id: project.id,
-        name: project.name,
-        version: project.version,
-        status: 'RUNNING',
-        port: activeInstance.port,
-        isSimulated: false,
-      };
+    // Check if this viewer already has a running instance (e.g. page refresh).
+    // The unique constraint on (projectId, viewerId) ensures at most one per viewer.
+    const existingViewerInstance = project.instances?.find(
+      (i) => i.viewerId === viewerId && i.status === 'RUNNING',
+    );
+
+    if (existingViewerInstance) {
+      // Verify the in-memory process is still tracked
+      const proc = this.activeProcesses.get(existingViewerInstance.id);
+      if (proc) {
+        return {
+          id: project.id,
+          name: project.name,
+          version: project.version,
+          instanceId: existingViewerInstance.id,
+          status: 'RUNNING',
+          port: existingViewerInstance.port,
+          isSimulated: false,
+        };
+      }
+      // Process died but DB says RUNNING — fall through to create a fresh instance.
     }
 
-    // No running instance — auto-start one for this viewer.
-    // Cold-start minimum: Wilbur bind (~1s) + UE process launch (~3-8s depending
-    // on the build) + WebRTC handshake (~0.5s) ≈ 5-10s total.
-    const startResult = await this.startInstance(project.id, project.userId);
+    // Clean up any stale STOPPED/ERROR records for this viewer before creating new
+    const staleInstance = project.instances?.find(
+      (i) => i.viewerId === viewerId && i.status !== 'RUNNING',
+    );
+    if (staleInstance) {
+      await this.prisma.instance.delete({ where: { id: staleInstance.id } }).catch(() => {});
+    }
+
+    // No running instance for this viewer — auto-start one with their viewport.
+    const startResult = await this.spawnInstance({
+      project,
+      ownerId: project.userId,
+      viewerId,
+      viewportWidth,
+      viewportHeight,
+    });
 
     return {
       id: project.id,
       name: project.name,
       version: project.version,
+      instanceId: startResult.instanceId,
       status: 'RUNNING',
       port: startResult.port,
       isSimulated: false,
     };
   }
 
+  /** Look up a project by its share slug (used by public stop endpoint). */
+  async findProjectByShareSlug(shareSlug: string) {
+    const project = await this.prisma.project.findUnique({ where: { shareSlug } });
+    if (!project) {
+      throw new NotFoundException(`Project not found`);
+    }
+    return project;
+  }
+
+  // ─── Owner dashboard flow ────────────────────────────────────────────
+
+  async startInstance(projectId: string, userId: string) {
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, userId },
+    });
+
+    if (!project) {
+      throw new NotFoundException(`Project with ID ${projectId} not found`);
+    }
+
+    // Check if owner already has a running instance
+    const existingOwnerInstance = await this.prisma.instance.findFirst({
+      where: { projectId, viewerId: null, status: 'RUNNING' },
+    });
+
+    if (existingOwnerInstance) {
+      const proc = this.activeProcesses.get(existingOwnerInstance.id);
+      if (proc) {
+        return {
+          message: 'Instance is already running',
+          port: proc.playerPort,
+          status: existingOwnerInstance.status,
+          isSimulated: false,
+        };
+      }
+      // Stale record, clean up
+      await this.prisma.instance
+        .update({ where: { id: existingOwnerInstance.id }, data: { status: 'STOPPED' } })
+        .catch(() => {});
+    }
+
+    // Spawn instance with default 1920x1080 (owner preview)
+    return this.spawnInstance({
+      project,
+      ownerId: userId,
+    });
+  }
+
+  async stopInstance(projectId: string, userId: string, instanceId?: string) {
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, userId },
+    });
+
+    if (!project) {
+      throw new NotFoundException(`Project with ID ${projectId} not found`);
+    }
+
+    if (instanceId) {
+      // Stop a specific instance (owner targeting one)
+      await this.stopSingleInstance(instanceId);
+    } else {
+      // Stop ALL instances for this project
+      const instances = this.getInstancesForProject(projectId);
+      for (const [id] of instances) {
+        await this.stopSingleInstance(id);
+      }
+    }
+
+    // Check if any instances remain running
+    const remainingInstances = this.getInstancesForProject(projectId);
+    const anyRunning = remainingInstances.length > 0;
+
+    await this.prisma.project.update({
+      where: { id: projectId },
+      data: { status: anyRunning ? 'RUNNING' : 'STOPPED' },
+    });
+
+    return {
+      message: 'Instance stopped successfully',
+      status: 'STOPPED',
+    };
+  }
+
+  // ─── Public viewer stop ──────────────────────────────────────────────
+
+  async stopViewerInstance(projectId: string, viewerId: string) {
+    const instances = this.getInstancesForProject(projectId);
+    const viewerEntry = instances.find(([, proc]) => proc.viewerId === viewerId);
+
+    if (viewerEntry) {
+      const [instanceId] = viewerEntry;
+      await this.stopSingleInstance(instanceId);
+    } else {
+      // No in-memory process; also clean DB
+      await this.prisma.instance
+        .updateMany({
+          where: { projectId, viewerId, status: 'RUNNING' },
+          data: { status: 'STOPPED' },
+        })
+        .catch(() => {});
+    }
+
+    // Check if any instances remain
+    const remainingInstances = this.getInstancesForProject(projectId);
+    if (remainingInstances.length === 0) {
+      await this.prisma.project
+        .update({ where: { id: projectId }, data: { status: 'STOPPED' } })
+        .catch(() => {});
+    }
+
+    return { message: 'Viewer instance stopped successfully', status: 'STOPPED' };
+  }
+
   async delete(id: string, userId: string) {
     const project = await this.findOne(id, userId);
 
-    // Stop if running
-    if (project.status === 'RUNNING') {
+    // Stop all instances if any are running
+    const instances = this.getInstancesForProject(id);
+    if (instances.length > 0 || project.status === 'RUNNING') {
       await this.stopInstance(id, userId);
     }
 
@@ -292,52 +445,68 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     return { success: true };
   }
 
-  async startInstance(projectId: string, userId: string) {
-    const project = await this.prisma.project.findFirst({
-      where: { id: projectId, userId },
-    });
+  // ─── Instance spawning (shared by owner + viewer flows) ──────────────
 
-    if (!project) {
-      throw new NotFoundException(`Project with ID ${projectId} not found`);
-    }
+  private async spawnInstance(params: {
+    project: any;
+    ownerId: string;
+    viewerId?: string;
+    viewportWidth?: number;
+    viewportHeight?: number;
+  }) {
+    const { project, ownerId, viewerId, viewportWidth, viewportHeight } = params;
 
-    // If already running
-    const existingInstance = await this.prisma.instance.findFirst({
-      where: { projectId, status: 'RUNNING' },
-    });
-
-    const activeProc = this.activeProcesses.get(projectId);
-
-    if (existingInstance && activeProc) {
-      return {
-        message: 'Instance is already running',
-        port: activeProc.playerPort,
-        status: existingInstance.status,
-        isSimulated: false,
-      };
-    }
-
-    // If DB has a RUNNING record but the process is not in memory
-    // (e.g. server restarted), clean up the stale record first
-    if (existingInstance && !activeProc) {
+    // Prevent concurrent spawns for the same project — if another call is already
+    // in progress (React StrictMode double-effect, rapid button clicks, etc.),
+    // wait for it to finish and return its result instead of spawning a duplicate.
+    if (this.spawningProjects.has(project.id)) {
       this.logger.warn(
-        `Found stale RUNNING instance ${existingInstance.id} on port ${existingInstance.port} ` +
-          `with no active process. Cleaning up before starting fresh.`,
+        `Project ${project.id} is already spawning — waiting for existing spawn to complete`,
       );
-      await this.prisma.instance
-        .update({
-          where: { id: existingInstance.id },
-          data: { status: 'STOPPED' },
-        })
-        .catch(() => {});
+      // Poll until the spawning finishes (max 30s)
+      const deadline = Date.now() + 30000;
+      while (this.spawningProjects.has(project.id) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      // Return the existing running instance if one was created
+      const existingInstance = [...this.activeProcesses.values()].find(
+        (p) => p.projectId === project.id && (!viewerId || p.viewerId === viewerId),
+      );
+      if (existingInstance) {
+        return {
+          instanceId: '', // will be set by caller from DB
+          port: existingInstance.playerPort,
+          status: 'RUNNING',
+          isSimulated: false,
+        };
+      }
+      // If still marked as spawning after timeout, something went wrong — proceed anyway
+    }
+
+    this.spawningProjects.add(project.id);
+
+    // Set project status to STARTING so concurrent requests see the project is in-flight
+    await this.prisma.project
+      .update({ where: { id: project.id }, data: { status: 'STARTING' } })
+      .catch(() => {});
+
+    // CCU enforcement: count running instances for this project
+    const runningInstances = this.getInstancesForProject(project.id);
+    if (runningInstances.length >= (project.maxCCU || 3)) {
+      this.spawningProjects.delete(project.id);
+      throw new BadRequestException(
+        `Project has reached its maximum concurrent viewer limit (${project.maxCCU || 3}). ` +
+          `Please try again later.`,
+      );
     }
 
     // Allocate free ports starting from 8800
     const streamerPort = await this.findFreePort(8800, 8900);
     const playerPort = await this.findFreePort(streamerPort + 1, 9000);
     const sfuPort = await this.findFreePort(playerPort + 1, 9100);
+    const viewerLabel = viewerId ? ` (viewer: ${viewerId})` : ' (owner preview)';
     this.logger.log(
-      `Allocated streamerPort ${streamerPort}, playerPort ${playerPort}, sfuPort ${sfuPort} for project ${project.name}`,
+      `Allocated streamerPort ${streamerPort}, playerPort ${playerPort}, sfuPort ${sfuPort} for project ${project.name}${viewerLabel}`,
     );
 
     // Verify signaling server is built before spawning
@@ -352,7 +521,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       `Spawning Epic Games signaling server on streamerPort ${streamerPort}, playerPort ${playerPort}`,
     );
 
-    const maxPlayers = project.maxCCU || 3;
+    // Per-viewer signaling server — max_players = 1 since each viewer has their own
     const signalingArgs = [
       jsPath,
       '--no_config',
@@ -363,7 +532,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       '--sfu_port',
       sfuPort.toString(),
       '--max_players',
-      maxPlayers.toString(),
+      '1',
       '--console_messages',
       'verbose',
       '--rest_api',
@@ -415,20 +584,16 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Signaling server HTTP handler confirmed ready on port ${playerPort}`);
     }
 
-    let ueProcess: any;
-    let pid: number;
-
     if (!project.executablePath || !project.extractedPath) {
-      // No executable was detected during upload — this is a hard error, not a simulation fallback
       this.logger.error(
         `Project "${project.name}" has no executablePath recorded. ` +
           `The upload scan did not find a valid .exe in the archive. ` +
           `Ensure your packaged build folder contains the project .exe at its root level.`,
       );
-      // Clean up the signaling server we just spawned
       if (signalingProcess && signalingProcess.pid) {
         this.killProcessTree(signalingProcess.pid);
       }
+      this.spawningProjects.delete(project.id);
       throw new BadRequestException(
         `No Unreal Engine executable found in project "${project.name}". ` +
           `Ensure your packaged build contains a .exe at the root level of the archive (not inside Engine/). ` +
@@ -444,6 +609,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       if (signalingProcess && signalingProcess.pid) {
         this.killProcessTree(signalingProcess.pid);
       }
+      this.spawningProjects.delete(project.id);
       throw new BadRequestException(
         `Executable file not found at expected path: ${project.executablePath}. ` +
           `The file may have been moved or deleted after upload.`,
@@ -453,15 +619,36 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     this.logger.log(`Spawning Unreal Engine executable: ${absoluteExePath}`);
     this.logger.log(`UE launch dir: ${path.dirname(absoluteExePath)}`);
 
+    // Diagnostic: check that the PixelStreaming plugin exists in the packaged build.
+    // If it's missing, UE will launch fine but never connect to Wilbur — the stream
+    // will hang indefinitely on "Exchanging SDP configuration tokens".
+    try {
+      this.checkPixelStreamingPlugin(project.extractedPath, project.name);
+    } catch (pluginErr: any) {
+      if (signalingProcess && signalingProcess.pid) {
+        this.killProcessTree(signalingProcess.pid);
+      }
+      this.spawningProjects.delete(project.id);
+      throw pluginErr;
+    }
+
+    // Add Windows Firewall rules before spawning so the exe can bind/listen
+    // without triggering a manual "Allow access" prompt (which hangs headless processes).
+    await this.addFirewallRule(project.id, absoluteExePath);
+
+    // Use viewer's exact viewport or default to 1920x1080 for owner preview
+    const resX = viewportWidth || 1920;
+    const resY = viewportHeight || 1080;
+
     // PixelStreaming2 launch flags (UE 5.4+)
-    // -PixelStreamingSignallingURL is the single-flag connection string for PixelStreaming2
-    // Falls back to -PixelStreamingIP/-PixelStreamingPort for older plugin versions
+    // -PixelStreamingSignallingURL is the single-flag connection string for PixelStreaming2.
+    // Do NOT pass -PixelStreamingIP/-PixelStreamingPort alongside it — those are legacy
+    // (PixelStreaming1) flags and passing both simultaneously causes the plugin to silently
+    // fail to register as a streamer with Wilbur.
     const args = [
       '-RenderOffscreen',
       '-AudioMixer',
       `-PixelStreamingSignallingURL=ws://127.0.0.1:${streamerPort}`,
-      `-PixelStreamingIP=127.0.0.1`,
-      `-PixelStreamingPort=${streamerPort}`,
       '-PixelStreamingEncoderCodec=H264',
       '-PixelStreamingWebRTCFps=60',
       '-PixelStreamingEncoderMinQP=1',
@@ -470,21 +657,29 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       '-PixelStreamingEncoderMaxBitrate=50000',
       '-PixelStreamingEncoderRateControl=CBR',
       '-ForceRes',
-      '-ResX=1920',
-      '-ResY=1080',
+      `-ResX=${resX}`,
+      `-ResY=${resY}`,
       '-Windowed',
     ];
     this.logger.log(`UE launch args: ${args.join(' ')}`);
+
+    let ueProcess: any;
+    let pid: number;
 
     try {
       ueProcess = spawn(absoluteExePath, args, {
         cwd: path.dirname(absoluteExePath),
       });
 
-      // Capture UE process stdout/stderr for debugging
+      // Capture UE process stdout/stderr for debugging.
+      // PixelStreaming-related lines are promoted to log level for visibility,
+      // since they're critical for diagnosing streamer registration with Wilbur.
       ueProcess.stdout?.on('data', (data: Buffer) => {
         const msg = data.toString().trim();
-        if (msg) {
+        if (!msg) return;
+        if (/pixelstreaming|signall?er|webrtc|streamer|registered/i.test(msg)) {
+          this.logger.log(`[UE-PID ${ueProcess.pid}][PS]: ${msg}`);
+        } else {
           this.logger.debug(`[UE-PID ${ueProcess.pid}][stdout]: ${msg}`);
         }
       });
@@ -515,60 +710,70 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       if (signalingProcess && signalingProcess.pid) {
         this.killProcessTree(signalingProcess.pid);
       }
+      await this.removeFirewallRule(project.id);
+      this.spawningProjects.delete(project.id);
       throw new BadRequestException(
         `Failed to launch Unreal Engine executable: ${err.message}. ` +
           `Ensure the .exe is a valid Windows binary and not corrupted.`,
       );
     }
 
-    // Save processes in memory map
+    // Create instance record in DB (with viewer metadata for per-viewer instances)
+    const instance = await this.prisma.instance.create({
+      data: {
+        projectId: project.id,
+        port: playerPort,
+        status: 'RUNNING',
+        pid,
+        viewerId: viewerId || null,
+        viewportWidth: viewportWidth || null,
+        viewportHeight: viewportHeight || null,
+      },
+    });
+
+    // Save processes in memory map, keyed by instanceId (not projectId)
     // Instance lifecycle is decoupled from any browser/WebSocket connection:
     // closing a tab, refreshing the page, or zero viewers will NOT stop this instance.
-    this.activeProcesses.set(projectId, {
+    // Only explicit stopViewerInstance() or stopInstance() will tear it down.
+    this.activeProcesses.set(instance.id, {
+      projectId: project.id,
       signalingProcess,
       ueProcess,
       playerPort,
       streamerPort,
       clients: 0,
-      ownerId: userId,
-    });
-
-    // Create instance record in DB
-    await this.prisma.instance.create({
-      data: {
-        projectId,
-        port: playerPort,
-        status: 'RUNNING',
-        pid,
-      },
+      ownerId,
+      viewerId,
     });
 
     // Update project status
     await this.prisma.project.update({
-      where: { id: projectId },
+      where: { id: project.id },
       data: { status: 'RUNNING' },
     });
 
+    this.logger.log(
+      `Instance ${instance.id} started successfully${viewerLabel} on port ${playerPort} ` +
+        `(${resX}x${resY})`,
+    );
+
+    this.spawningProjects.delete(project.id);
+
     return {
-      message: 'Instance started successfully',
+      instanceId: instance.id,
       port: playerPort,
       status: 'RUNNING',
       isSimulated: false,
     };
   }
 
-  async stopInstance(projectId: string, userId: string) {
-    const project = await this.prisma.project.findFirst({
-      where: { id: projectId, userId },
-    });
+  // ─── Instance teardown ───────────────────────────────────────────────
 
-    if (!project) {
-      throw new NotFoundException(`Project with ID ${projectId} not found`);
-    }
-
-    const proc = this.activeProcesses.get(projectId);
+  /** Stop a single instance by its ID (kills processes, cleans up map + DB). */
+  private async stopSingleInstance(instanceId: string) {
+    const proc = this.activeProcesses.get(instanceId);
     if (proc) {
-      this.logger.log(`Stopping instance for project ${project.name}...`);
+      this.logger.log(`Stopping instance ${instanceId}...`);
       if (proc.ueProcess && proc.ueProcess.pid) {
         this.logger.log(`Killing Unreal process PID ${proc.ueProcess.pid}`);
         try {
@@ -585,25 +790,164 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
           this.logger.warn(`Could not kill process ${proc.signalingProcess.pid}: ${e.message}`);
         }
       }
-      this.activeProcesses.delete(projectId);
+      // Remove the Windows Firewall rule that was added for this instance
+      await this.removeFirewallRule(proc.projectId);
+      this.activeProcesses.delete(instanceId);
     }
 
-    // Update instance records in DB
-    await this.prisma.instance.updateMany({
-      where: { projectId, status: 'RUNNING' },
-      data: { status: 'STOPPED' },
-    });
+    // Update instance record in DB
+    await this.prisma.instance
+      .update({ where: { id: instanceId }, data: { status: 'STOPPED' } })
+      .catch(() => {});
+  }
 
-    // Update project status
-    await this.prisma.project.update({
-      where: { id: projectId },
-      data: { status: 'STOPPED' },
-    });
+  // ─── Diagnostics ────────────────────────────────────────────────────
 
-    return {
-      message: 'Instance stopped successfully',
-      status: 'STOPPED',
+  /**
+   * Checks whether the PixelStreaming plugin is present in the packaged UE build.
+   * If missing, UE will launch and render fine but never connect to Wilbur,
+   * causing the stream to hang forever on "Exchanging SDP configuration tokens".
+   *
+   * This is a known issue with packaged UE builds: the PixelStreaming plugin must
+   * be explicitly enabled in the .uproject file BEFORE packaging. If you packaged
+   * the build without it, you must re-package with the plugin enabled.
+   */
+  private checkPixelStreamingPlugin(extractedPath: string | null, projectName: string) {
+    if (!extractedPath) return;
+
+    const buildDir = path.resolve(extractedPath);
+
+    // Recursively search for PixelStreaming .uplugin files in the build directory
+    const findPlugin = (dir: string, depth = 0): string | null => {
+      if (depth > 6) return null; // don't recurse too deep
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(dir, { withFileTypes: true });
+      } catch {
+        return null;
+      }
+      for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isFile() && /^PixelStreaming.*\.uplugin$/i.test(entry.name)) {
+          return fullPath;
+        }
+        if (
+          entry.isDirectory() &&
+          entry.name !== 'Engine' && // don't recurse into nested Engine dirs
+          !entry.name.startsWith('.')
+        ) {
+          const found = findPlugin(fullPath, depth + 1);
+          if (found) return found;
+        }
+      }
+      return null;
     };
+
+    const pluginPath = findPlugin(buildDir);
+    if (pluginPath) {
+      this.logger.log(`PixelStreaming plugin found: ${pluginPath}`);
+    } else {
+      const helpMsg =
+        `PixelStreaming plugin not found in packaged build for "${projectName}". ` +
+        `The UE process would launch but never connect to the signaling server, ` +
+        `causing the browser stream to hang on "Connecting...". ` +
+        `Re-package your UE build with the PixelStreaming plugin enabled ` +
+        `(check "Pixel Streaming" in Edit → Plugins, or add ` +
+        `{ "Name": "PixelStreaming", "Enabled": true } to your .uproject), ` +
+        `then re-upload.`;
+
+      this.logger.error(
+        `\n` +
+          `══════════════════════════════════════════════════════════════════\n` +
+          `  PIXEL STREAMING PLUGIN NOT FOUND IN PACKAGED BUILD\n` +
+          `══════════════════════════════════════════════════════════════════\n` +
+          `  Project: ${projectName}\n` +
+          `  Build:   ${buildDir}\n` +
+          `\n` +
+          `  The UE process will launch and render, but will NEVER connect\n` +
+          `  to Wilbur (the signaling server). The browser stream will hang\n` +
+          `  forever on "Exchanging SDP configuration tokens".\n` +
+          `\n` +
+          `  TO FIX: Re-package your UE build with the PixelStreaming plugin\n` +
+          `  enabled. In your .uproject file, ensure:\n` +
+          `\n` +
+          `    "Plugins": [\n` +
+          `      { "Name": "PixelStreaming", "Enabled": true }\n` +
+          `    ]\n` +
+          `\n` +
+          `  Then re-package the build and re-upload.\n` +
+          `══════════════════════════════════════════════════════════════════`,
+      );
+
+      throw new BadRequestException(helpMsg);
+    }
+  }
+
+  // ─── Helpers ─────────────────────────────────────────────────────────
+
+  // Helper: Add Windows Firewall rules for the UE executable so it can
+  // bind/listen/connect without triggering a manual "Allow access" prompt.
+  // Requires the backend process to run as Administrator.
+  // Logs a clear ERROR on failure but does NOT throw — the UE process will
+  // still launch, though Windows may prompt for firewall access or block it.
+  private async addFirewallRule(projectId: string, exePath: string): Promise<void> {
+    if (process.platform !== 'win32') return;
+    const ruleName = `PixelStreaming-${projectId}`;
+    const { execSync } = require('child_process');
+    try {
+      execSync(
+        `netsh advfirewall firewall add rule name="${ruleName}" dir=in action=allow program="${exePath}" enable=yes`,
+        { timeout: 10000 },
+      );
+      execSync(
+        `netsh advfirewall firewall add rule name="${ruleName}-out" dir=out action=allow program="${exePath}" enable=yes`,
+        { timeout: 10000 },
+      );
+      this.logger.log(`Added Windows Firewall rules for ${exePath} (rule: ${ruleName})`);
+    } catch (err: any) {
+      const output = (err.stdout?.toString() || '') + (err.stderr?.toString() || '');
+      this.logger.error(
+        `═══════════════════════════════════════════════════════════════\n` +
+          `  FIREWALL RULE FAILED — UE process may be blocked by Windows\n` +
+          `═══════════════════════════════════════════════════════════════\n` +
+          `  Rule:    ${ruleName}\n` +
+          `  EXE:     ${exePath}\n` +
+          `  Error:   ${err.message}\n` +
+          `  Output:  ${output.trim() || '(empty)'}\n` +
+          `\n` +
+          `  TO FIX: Open an elevated (Administrator) PowerShell and run:\n` +
+          `    netsh advfirewall firewall add rule name="${ruleName}" dir=in  action=allow program="${exePath}" enable=yes\n` +
+          `    netsh advfirewall firewall add rule name="${ruleName}-out" dir=out action=allow program="${exePath}" enable=yes\n` +
+          `\n` +
+          `  Or re-launch the backend as Administrator:\n` +
+          `    Right-click PowerShell → "Run as Administrator"\n` +
+          `    cd S:\\mvp\\apps\\backend && npm run dev\n` +
+          `═══════════════════════════════════════════════════════════════`,
+      );
+      this.logger.warn(
+        `Proceeding without firewall rule — UE process will start but may not be reachable.`,
+      );
+    }
+  }
+
+  // Helper: Remove Windows Firewall rules for a project
+  private async removeFirewallRule(projectId: string): Promise<void> {
+    if (process.platform !== 'win32') return;
+    const ruleName = `PixelStreaming-${projectId}`;
+    try {
+      const { execSync } = require('child_process');
+      execSync(`netsh advfirewall firewall delete rule name="${ruleName}"`, {
+        stdio: 'ignore',
+        timeout: 10000,
+      });
+      execSync(`netsh advfirewall firewall delete rule name="${ruleName}-out"`, {
+        stdio: 'ignore',
+        timeout: 10000,
+      });
+      this.logger.log(`Removed Windows Firewall rules (rule: ${ruleName})`);
+    } catch (err: any) {
+      this.logger.warn(`Failed to remove Windows Firewall rule: ${err.message}`);
+    }
   }
 
   // Helper: Find first free TCP port in a range
@@ -703,7 +1047,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   private startMetricsPolling() {
     const axios = require('axios');
     setInterval(async () => {
-      for (const [projectId, proc] of this.activeProcesses.entries()) {
+      for (const [, proc] of this.activeProcesses.entries()) {
         try {
           const res = await axios.get(`http://127.0.0.1:${proc.playerPort}/status`, {
             timeout: 1000,
@@ -825,8 +1169,8 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   // Helper: Clean up a stale instance whose processes are no longer alive
   private async cleanupStaleInstance(projectId: string, instanceId: string) {
     try {
-      // Remove from in-memory process map if present
-      const proc = this.activeProcesses.get(projectId);
+      // Remove from in-memory process map if present (keyed by instanceId)
+      const proc = this.activeProcesses.get(instanceId);
       if (proc) {
         if (proc.ueProcess && proc.ueProcess.pid) {
           try {
@@ -842,7 +1186,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
             /* ignore */
           }
         }
-        this.activeProcesses.delete(projectId);
+        this.activeProcesses.delete(instanceId);
       }
 
       // Mark instance as stopped in DB
@@ -853,13 +1197,16 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         })
         .catch(() => {});
 
-      // Mark project as stopped
-      await this.prisma.project
-        .update({
-          where: { id: projectId },
-          data: { status: 'STOPPED' },
-        })
-        .catch(() => {});
+      // Mark project as stopped only if no other instances are running
+      const remaining = this.getInstancesForProject(projectId);
+      if (remaining.length === 0) {
+        await this.prisma.project
+          .update({
+            where: { id: projectId },
+            data: { status: 'STOPPED' },
+          })
+          .catch(() => {});
+      }
 
       this.logger.log(`Cleaned up stale instance ${instanceId} for project ${projectId}`);
     } catch (err) {
