@@ -16,6 +16,9 @@ import { createExtractorFromFile } from 'node-unrar-js';
 @Injectable()
 export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ProjectsService.name);
+  // Instance lifecycle is fully decoupled from WebSocket/browser connections.
+  // Once started, an instance runs until explicitly stopped via stopInstance().
+  // Player count is tracked for display only — zero players never triggers shutdown.
   private activeProcesses = new Map<
     string,
     {
@@ -24,7 +27,6 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       playerPort: number;
       streamerPort: number;
       clients: number;
-      idleSeconds: number;
       ownerId: string;
     }
   >();
@@ -40,24 +42,40 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Created projects storage directory at ${projectsDir}`);
     }
 
-    // Reset running instance states in DB to stopped on boot (prevents orphaned states)
-    this.prisma.instance.updateMany({
-      where: { status: 'RUNNING' },
-      data: { status: 'STOPPED' },
-    }).then(() => {
-      this.logger.log('Reset all active instance states in database');
-    }).catch(err => {
-      this.logger.error(`Failed to reset instance states: ${err.message}`);
-    });
-
-    this.prisma.project.updateMany({
-      where: { status: 'RUNNING' },
-      data: { status: 'STOPPED' },
-    }).then(() => {
-      this.logger.log('Reset all active project states in database');
-    }).catch(err => {
-      this.logger.error(`Failed to reset project states: ${err.message}`);
-    });
+    // On backend restart, check each RUNNING instance's signaling server port.
+    // If still responsive, the UE process and Wilbur are alive — leave the DB record as-is
+    // so the public share link continues to work without re-spawning.
+    // If NOT responsive, the processes died — mark as STOPPED so getByShareSlug
+    // will auto-start a fresh instance on next access.
+    this.prisma.instance
+      .findMany({ where: { status: 'RUNNING' } })
+      .then(async (instances) => {
+        let resetCount = 0;
+        let keptCount = 0;
+        for (const instance of instances) {
+          const alive = await this.checkPortStatus(instance.port, 2000);
+          if (alive) {
+            keptCount++;
+            this.logger.log(
+              `Instance ${instance.id} on port ${instance.port} is still alive — keeping RUNNING`,
+            );
+          } else {
+            await this.prisma.instance
+              .update({ where: { id: instance.id }, data: { status: 'STOPPED' } })
+              .catch(() => {});
+            await this.prisma.project
+              .update({ where: { id: instance.projectId }, data: { status: 'STOPPED' } })
+              .catch(() => {});
+            resetCount++;
+          }
+        }
+        this.logger.log(
+          `Startup instance check: ${keptCount} kept alive, ${resetCount} marked STOPPED`,
+        );
+      })
+      .catch((err) => {
+        this.logger.error(`Failed to check instance states on startup: ${err.message}`);
+      });
 
     this.startMetricsPolling();
   }
@@ -130,7 +148,9 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         const zip = new AdmZip(zipPath);
         zip.extractAllTo(projectDir, true);
         const entries = zip.getEntries();
-        this.logger.log(`ZIP extraction complete — ${entries.length} entries extracted to ${projectDir}`);
+        this.logger.log(
+          `ZIP extraction complete — ${entries.length} entries extracted to ${projectDir}`,
+        );
       }
 
       // Search for executable
@@ -142,13 +162,15 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
           where: { id: projectId },
           data: { executablePath: relativeExePath },
         });
-        this.logger.log(`✅ Executable found and saved: ${relativeExePath} (absolute: ${exeFullPath})`);
+        this.logger.log(
+          `✅ Executable found and saved: ${relativeExePath} (absolute: ${exeFullPath})`,
+        );
       } else {
         this.logger.warn(
           `⚠️ No valid executable (.exe) found in the extracted project archive. ` +
-          `The project directory was scanned recursively (excluding Engine/ subfolders) ` +
-          `but no project executable was detected. ` +
-          `You will need to re-upload with a build that contains a .exe at the root level.`,
+            `The project directory was scanned recursively (excluding Engine/ subfolders) ` +
+            `but no project executable was detected. ` +
+            `You will need to re-upload with a build that contains a .exe at the root level.`,
         );
       }
     } catch (error) {
@@ -214,22 +236,34 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       throw new NotFoundException(`Project not found`);
     }
 
-    // Check if there is already a running instance
-    let activeInstance = project.instances?.find((i) => i.status === 'RUNNING');
-    let port = activeInstance?.port || null;
-
-    if (!activeInstance) {
-      // Auto-start the instance using the project owner's userId
-      const startResult = await this.startInstance(project.id, project.userId);
-      port = startResult.port;
+    // Check if there is already a running instance.
+    // onModuleInit validates instance health at startup and marks dead ones STOPPED,
+    // so any instance still RUNNING in the DB is genuinely alive — no per-request
+    // port probe needed. This keeps the fast path (instance already running) down to
+    // a single DB query with no network I/O.
+    const activeInstance = project.instances?.find((i) => i.status === 'RUNNING');
+    if (activeInstance) {
+      return {
+        id: project.id,
+        name: project.name,
+        version: project.version,
+        status: 'RUNNING',
+        port: activeInstance.port,
+        isSimulated: false,
+      };
     }
+
+    // No running instance — auto-start one for this viewer.
+    // Cold-start minimum: Wilbur bind (~1s) + UE process launch (~3-8s depending
+    // on the build) + WebRTC handshake (~0.5s) ≈ 5-10s total.
+    const startResult = await this.startInstance(project.id, project.userId);
 
     return {
       id: project.id,
       name: project.name,
       version: project.version,
       status: 'RUNNING',
-      port,
+      port: startResult.port,
       isSimulated: false,
     };
   }
@@ -283,10 +317,28 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
+    // If DB has a RUNNING record but the process is not in memory
+    // (e.g. server restarted), clean up the stale record first
+    if (existingInstance && !activeProc) {
+      this.logger.warn(
+        `Found stale RUNNING instance ${existingInstance.id} on port ${existingInstance.port} ` +
+          `with no active process. Cleaning up before starting fresh.`,
+      );
+      await this.prisma.instance
+        .update({
+          where: { id: existingInstance.id },
+          data: { status: 'STOPPED' },
+        })
+        .catch(() => {});
+    }
+
     // Allocate free ports starting from 8800
     const streamerPort = await this.findFreePort(8800, 8900);
     const playerPort = await this.findFreePort(streamerPort + 1, 9000);
-    this.logger.log(`Allocated streamerPort ${streamerPort} and playerPort ${playerPort} for project ${project.name}`);
+    const sfuPort = await this.findFreePort(playerPort + 1, 9100);
+    this.logger.log(
+      `Allocated streamerPort ${streamerPort}, playerPort ${playerPort}, sfuPort ${sfuPort} for project ${project.name}`,
+    );
 
     // Verify signaling server is built before spawning
     const signalingDir = this.getSignalingDir();
@@ -296,8 +348,10 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         `Signaling server not built. Expected ${jsPath} to exist. Run 'npm run build' in the signaling directory.`,
       );
     }
-    this.logger.log(`Spawning Epic Games signaling server on streamerPort ${streamerPort}, playerPort ${playerPort}`);
-    
+    this.logger.log(
+      `Spawning Epic Games signaling server on streamerPort ${streamerPort}, playerPort ${playerPort}`,
+    );
+
     const maxPlayers = project.maxCCU || 3;
     const signalingArgs = [
       jsPath,
@@ -306,6 +360,8 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       streamerPort.toString(),
       '--player_port',
       playerPort.toString(),
+      '--sfu_port',
+      sfuPort.toString(),
       '--max_players',
       maxPlayers.toString(),
       '--console_messages',
@@ -337,7 +393,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
 
     // Wait for the signaling server player port to become active
     this.logger.log(`Waiting for signaling server to bind to playerPort ${playerPort}...`);
-    const isSignalingReady = await this.checkPortStatus(playerPort, 10000); // 10s timeout
+    const isSignalingReady = await this.checkPortStatus(playerPort, 5000);
     if (!isSignalingReady) {
       this.logger.error(`Signaling server failed to start on port ${playerPort} in time`);
       if (signalingProcess && signalingProcess.pid) {
@@ -345,12 +401,16 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       }
       throw new BadRequestException('Signaling server health check failed on playerPort');
     }
-    this.logger.log(`Signaling server TCP port ${playerPort} is bound. Verifying HTTP handler is ready...`);
+    this.logger.log(
+      `Signaling server TCP port ${playerPort} is bound. Verifying HTTP handler is ready...`,
+    );
 
-    // HTTP health check: ensure the signaling server's REST API is responding
-    const httpReady = await this.checkHttpReady(playerPort, 10000);
+    // Quick HTTP readiness check — Wilbur typically responds within a few hundred ms
+    const httpReady = await this.checkHttpReady(playerPort, 3000);
     if (!httpReady) {
-      this.logger.warn(`Signaling server HTTP handler not ready on port ${playerPort}, proceeding anyway`);
+      this.logger.warn(
+        `Signaling server HTTP handler not ready on port ${playerPort}, proceeding anyway`,
+      );
     } else {
       this.logger.log(`Signaling server HTTP handler confirmed ready on port ${playerPort}`);
     }
@@ -362,8 +422,8 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       // No executable was detected during upload — this is a hard error, not a simulation fallback
       this.logger.error(
         `Project "${project.name}" has no executablePath recorded. ` +
-        `The upload scan did not find a valid .exe in the archive. ` +
-        `Ensure your packaged build folder contains the project .exe at its root level.`,
+          `The upload scan did not find a valid .exe in the archive. ` +
+          `Ensure your packaged build folder contains the project .exe at its root level.`,
       );
       // Clean up the signaling server we just spawned
       if (signalingProcess && signalingProcess.pid) {
@@ -371,8 +431,8 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       }
       throw new BadRequestException(
         `No Unreal Engine executable found in project "${project.name}". ` +
-        `Ensure your packaged build contains a .exe at the root level of the archive (not inside Engine/). ` +
-        `The uploaded archive was scanned and no valid project executable was detected.`,
+          `Ensure your packaged build contains a .exe at the root level of the archive (not inside Engine/). ` +
+          `The uploaded archive was scanned and no valid project executable was detected.`,
       );
     }
 
@@ -386,7 +446,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       }
       throw new BadRequestException(
         `Executable file not found at expected path: ${project.executablePath}. ` +
-        `The file may have been moved or deleted after upload.`,
+          `The file may have been moved or deleted after upload.`,
       );
     }
 
@@ -404,6 +464,11 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       `-PixelStreamingPort=${streamerPort}`,
       '-PixelStreamingEncoderCodec=H264',
       '-PixelStreamingWebRTCFps=60',
+      '-PixelStreamingEncoderMinQP=1',
+      '-PixelStreamingEncoderMaxQP=28',
+      '-PixelStreamingEncoderTargetBitrate=20000',
+      '-PixelStreamingEncoderMaxBitrate=50000',
+      '-PixelStreamingEncoderRateControl=CBR',
       '-ForceRes',
       '-ResX=1920',
       '-ResY=1080',
@@ -435,7 +500,9 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       });
 
       ueProcess.on('exit', (code: number | null, signal: string | null) => {
-        this.logger.log(`[UE-PID ${ueProcess.pid}] Process exited with code=${code}, signal=${signal}`);
+        this.logger.log(
+          `[UE-PID ${ueProcess.pid}] Process exited with code=${code}, signal=${signal}`,
+        );
       });
 
       pid = ueProcess.pid;
@@ -450,18 +517,19 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       }
       throw new BadRequestException(
         `Failed to launch Unreal Engine executable: ${err.message}. ` +
-        `Ensure the .exe is a valid Windows binary and not corrupted.`,
+          `Ensure the .exe is a valid Windows binary and not corrupted.`,
       );
     }
 
     // Save processes in memory map
+    // Instance lifecycle is decoupled from any browser/WebSocket connection:
+    // closing a tab, refreshing the page, or zero viewers will NOT stop this instance.
     this.activeProcesses.set(projectId, {
       signalingProcess,
       ueProcess,
       playerPort,
       streamerPort,
       clients: 0,
-      idleSeconds: 0,
       ownerId: userId,
     });
 
@@ -618,7 +686,10 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
           resolve(res.statusCode === 200);
         });
         req.on('error', () => resolve(false));
-        req.on('timeout', () => { req.destroy(); resolve(false); });
+        req.on('timeout', () => {
+          req.destroy();
+          resolve(false);
+        });
       });
       if (isReady) return true;
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -626,34 +697,22 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     return false;
   }
 
-  // Helper: Poll metrics and enforce auto-stop idle timeouts
+  // Polls the signaling server's /status endpoint for the current player count (CCU).
+  // This is purely informational — it never triggers auto-stop or process cleanup.
+  // Instance lifecycle is entirely driven by explicit user actions (start/stop).
   private startMetricsPolling() {
     const axios = require('axios');
     setInterval(async () => {
       for (const [projectId, proc] of this.activeProcesses.entries()) {
-        // Query Wilbur's REST API for CCU count
         try {
-          const res = await axios.get(`http://127.0.0.1:${proc.playerPort}/status`, { timeout: 1000 });
+          const res = await axios.get(`http://127.0.0.1:${proc.playerPort}/status`, {
+            timeout: 1000,
+          });
           if (res.data && typeof res.data.player_count === 'number') {
             proc.clients = res.data.player_count;
           }
         } catch (err) {
-          // Ignore polling errors
-        }
-
-        // Auto-stop if idle with no connected players
-        if (proc.clients === 0) {
-          proc.idleSeconds += 3;
-          if (proc.idleSeconds >= 60) { // 60 seconds idle timeout
-            this.logger.log(`Project ${projectId} has been idle for ${proc.idleSeconds}s. Triggering auto-stop.`);
-            try {
-              await this.stopInstance(projectId, proc.ownerId);
-            } catch (err) {
-              this.logger.error(`Failed to auto-stop idle project ${projectId}: ${err.message}`);
-            }
-          }
-        } else {
-          proc.idleSeconds = 0;
+          // Ignore polling errors — does not affect instance lifecycle
         }
       }
     }, 3000);
@@ -686,18 +745,24 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     // PASS 1: Scan root directory only (non-recursive)
     const rootExes = this.scanDirForExes(dir);
     if (rootExes.length > 0) {
-      this.logger.log(`Found ${rootExes.length} executable(s) at root level: ${rootExes.map((e) => path.basename(e)).join(', ')}`);
+      this.logger.log(
+        `Found ${rootExes.length} executable(s) at root level: ${rootExes.map((e) => path.basename(e)).join(', ')}`,
+      );
       const selected = rootExes[0];
       this.logger.log(`Selected root-level executable: ${selected}`);
       return selected;
     }
 
-    this.logger.log('No root-level executable found. Scanning subdirectories (excluding Engine/)...');
+    this.logger.log(
+      'No root-level executable found. Scanning subdirectories (excluding Engine/)...',
+    );
 
     // PASS 2: Recurse into subdirectories but SKIP anything under Engine/
     const subExes = this.findExecutableRecursive(dir, dir);
     if (subExes.length > 0) {
-      this.logger.log(`Found ${subExes.length} executable(s) in subdirectories: ${subExes.map((e) => path.relative(dir, e)).join(', ')}`);
+      this.logger.log(
+        `Found ${subExes.length} executable(s) in subdirectories: ${subExes.map((e) => path.relative(dir, e)).join(', ')}`,
+      );
       const selected = subExes[0];
       this.logger.log(`Selected subdirectory executable: ${selected}`);
       return selected;
@@ -755,6 +820,51 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       }
     }
     return results;
+  }
+
+  // Helper: Clean up a stale instance whose processes are no longer alive
+  private async cleanupStaleInstance(projectId: string, instanceId: string) {
+    try {
+      // Remove from in-memory process map if present
+      const proc = this.activeProcesses.get(projectId);
+      if (proc) {
+        if (proc.ueProcess && proc.ueProcess.pid) {
+          try {
+            this.killProcessTree(proc.ueProcess.pid);
+          } catch {
+            /* ignore */
+          }
+        }
+        if (proc.signalingProcess && proc.signalingProcess.pid) {
+          try {
+            this.killProcessTree(proc.signalingProcess.pid);
+          } catch {
+            /* ignore */
+          }
+        }
+        this.activeProcesses.delete(projectId);
+      }
+
+      // Mark instance as stopped in DB
+      await this.prisma.instance
+        .update({
+          where: { id: instanceId },
+          data: { status: 'STOPPED' },
+        })
+        .catch(() => {});
+
+      // Mark project as stopped
+      await this.prisma.project
+        .update({
+          where: { id: projectId },
+          data: { status: 'STOPPED' },
+        })
+        .catch(() => {});
+
+      this.logger.log(`Cleaned up stale instance ${instanceId} for project ${projectId}`);
+    } catch (err) {
+      this.logger.error(`Failed to clean up stale instance ${instanceId}: ${err.message}`);
+    }
   }
 
   // Helper: Kill a process and its children (cross-platform)

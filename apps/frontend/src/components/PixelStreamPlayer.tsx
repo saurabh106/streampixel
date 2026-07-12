@@ -1,12 +1,30 @@
 'use client';
 
-import React, { useEffect, useRef, useState } from 'react';
-import { VolumeX, Volume2, Maximize, AlertCircle, RefreshCw } from 'lucide-react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
+import { AlertCircle, RefreshCw } from 'lucide-react';
 
 interface PixelStreamPlayerProps {
   port: number;
   isSimulated?: boolean;
+  fullscreen?: boolean;
   onLog?: (message: string) => void;
+}
+
+// Module-level cache for the PixelStreaming library import.
+// Once resolved the first time, subsequent mounts reuse the cached modules
+// instantly — no network fetch, no parse, no webpack chunk loading.
+// Call preloadPixelStreamingLibrary() from the parent page to start loading
+// the library in parallel with the API call, so it's ready by the time the
+// component mounts.
+let cachedLibraryImport: Promise<
+  typeof import('@epicgames-ps/lib-pixelstreamingfrontend-ue5.5')
+> | null = null;
+
+export function preloadPixelStreamingLibrary() {
+  if (!cachedLibraryImport) {
+    cachedLibraryImport = import('@epicgames-ps/lib-pixelstreamingfrontend-ue5.5');
+  }
+  return cachedLibraryImport;
 }
 
 function patchWebSocket() {
@@ -16,20 +34,22 @@ function patchWebSocket() {
   if ((OriginalWebSocket as any).__patched) return;
 
   function PatchedWebSocket(url: string, protocols?: string | string[]) {
-    const ws = protocols !== undefined
-      ? new OriginalWebSocket(url, protocols)
-      : new OriginalWebSocket(url);
+    const ws =
+      protocols !== undefined ? new OriginalWebSocket(url, protocols) : new OriginalWebSocket(url);
 
     const originalSend = ws.send.bind(ws);
     const queue: any[] = [];
     let ready = false;
 
-    const origOnOpen = ws.onopen;
     ws.addEventListener('open', () => {
       ready = true;
       while (queue.length > 0) {
         const msg = queue.shift();
-        try { originalSend(msg); } catch (e) { /* ignore */ }
+        try {
+          originalSend(msg);
+        } catch (e) {
+          /* ignore */
+        }
       }
     });
 
@@ -51,10 +71,15 @@ function patchWebSocket() {
   PatchedWebSocket.CLOSED = OriginalWebSocket.CLOSED;
   (PatchedWebSocket as any).__patched = true;
 
-  window.WebSocket = PatchedWebSocket as any;
+  (window as any).WebSocket = PatchedWebSocket;
 }
 
-export default function PixelStreamPlayer({ port, isSimulated, onLog }: PixelStreamPlayerProps) {
+export default function PixelStreamPlayer({
+  port,
+  isSimulated,
+  fullscreen,
+  onLog,
+}: PixelStreamPlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const streamRef = useRef<any>(null);
   const simIntervalRef = useRef<number | null>(null);
@@ -62,7 +87,10 @@ export default function PixelStreamPlayer({ port, isSimulated, onLog }: PixelStr
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
-  const [isMuted, setIsMuted] = useState(true);
+
+  const focusContainer = useCallback(() => {
+    containerRef.current?.focus();
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -102,95 +130,135 @@ export default function PixelStreamPlayer({ port, isSimulated, onLog }: PixelStr
     let retryCount = 0;
     const MAX_RETRIES = 3;
     const RETRY_DELAY_MS = 2000;
+    const CONNECTION_TIMEOUT_MS = 30000;
+
+    let connectionTimer: ReturnType<typeof setTimeout> | null = null;
 
     function connectStream() {
-      import('@epicgames-ps/lib-pixelstreamingfrontend-ue5.5').then(({ Config, PixelStreaming }) => {
-        if (!active) return;
+      connectionTimer = setTimeout(() => {
+        if (active && !streamRef.current) {
+          setError('Connection timed out — the stream did not initialize within 30 seconds');
+          onLog?.('Error: Connection timed out');
+        }
+      }, CONNECTION_TIMEOUT_MS);
 
-        try {
-          const config = new Config({
-            initialSettings: {
-              AutoConnect: true,
-              AutoPlayVideo: true,
-              StartVideoMuted: true,
-              ss: wsUrl,
-            },
-          });
+      // Use the module-level cache so the library is loaded in parallel with the
+      // API call that provided the port. On subsequent mounts the cached modules
+      // resolve instantly.
+      preloadPixelStreamingLibrary()
+        .then(({ Config, PixelStreaming }) => {
+          if (!active) return;
 
-          const overrides = {
-            videoElementParent: containerRef.current || undefined,
-          };
+          try {
+            const config = new Config({
+              initialSettings: {
+                AutoConnect: true,
+                AutoPlayVideo: true,
+                StartVideoMuted: true,
+                ss: wsUrl,
+                HoveringMouse: true,
+                SuppressBrowserKeys: true,
+                MatchViewportRes: false,
+                ControlsQuality: true,
+                WebRTCMaxBitrate: 50000,
+                WebRTCMinBitrate: 5000,
+                WebRTCFPS: 60,
+              },
+            });
 
-          const stream = new PixelStreaming(config, overrides);
-          streamRef.current = stream;
+            const overrides = {
+              videoElementParent: containerRef.current || undefined,
+            };
 
-          stream.addEventListener('webRtcConnecting', () => {
-            onLog?.('WebRTC connection negotiating...');
-          });
+            const stream = new PixelStreaming(config, overrides);
+            streamRef.current = stream;
 
-          stream.addEventListener('webRtcConnected', () => {
-            console.log('WebRTC peer connection established');
-            onLog?.('WebRTC peer connection established');
-          });
+            stream.addEventListener('webRtcConnecting', () => {
+              onLog?.('WebRTC connection negotiating...');
+            });
 
-          stream.addEventListener('videoInitialized', () => {
-            setLoading(false);
-            setConnected(true);
-            retryCount = 0;
-            console.log('Video stream initialized');
-            onLog?.('WebRTC Audio/Video stream connected successfully!');
+            stream.addEventListener('webRtcConnected', () => {
+              onLog?.('WebRTC peer connection established');
+            });
 
-            const video = containerRef.current?.querySelector('video');
-            if (video) {
-              video.muted = isMuted;
-            }
-          });
+            stream.addEventListener('videoInitialized', () => {
+              if (connectionTimer) clearTimeout(connectionTimer);
+              setLoading(false);
+              setConnected(true);
+              retryCount = 0;
+              onLog?.('WebRTC Audio/Video stream connected successfully!');
 
-          stream.addEventListener('webRtcDisconnected', () => {
-            setConnected(false);
-            console.log('Pixel Streaming closed');
-            onLog?.('Pixel Streaming connection closed');
-          });
+              focusContainer();
+            });
 
-          stream.addEventListener('webRtcFailed', () => {
-            setConnected(false);
-            setLoading(false);
+            stream.addEventListener('webRtcDisconnected', () => {
+              setConnected(false);
+              onLog?.('Pixel Streaming connection closed');
+            });
+
+            stream.addEventListener('webRtcFailed', () => {
+              if (connectionTimer) clearTimeout(connectionTimer);
+              setConnected(false);
+              setLoading(false);
+              if (retryCount < MAX_RETRIES) {
+                retryCount++;
+                onLog?.(`WebRTC handshake failed. Retry ${retryCount}/${MAX_RETRIES}...`);
+                setTimeout(() => {
+                  if (active) {
+                    try {
+                      stream.disconnect();
+                    } catch (e) {
+                      /* ignore */
+                    }
+                    streamRef.current = null;
+                    connectStream();
+                  }
+                }, RETRY_DELAY_MS);
+              } else {
+                setError('WebRTC connection handshake failed after retries');
+                onLog?.('Error: WebRTC connection handshake failed');
+              }
+            });
+          } catch (err: any) {
+            console.error(err);
+            if (connectionTimer) clearTimeout(connectionTimer);
             if (retryCount < MAX_RETRIES) {
               retryCount++;
-              onLog?.(`WebRTC handshake failed. Retry ${retryCount}/${MAX_RETRIES}...`);
+              onLog?.(`Connection error: ${err.message}. Retry ${retryCount}/${MAX_RETRIES}...`);
               setTimeout(() => {
-                if (active) {
-                  try { stream.disconnect(); } catch (e) { /* ignore */ }
-                  streamRef.current = null;
-                  connectStream();
-                }
+                if (active) connectStream();
               }, RETRY_DELAY_MS);
             } else {
-              setError('WebRTC connection handshake failed after retries');
-              onLog?.('Error: WebRTC connection handshake failed');
+              setError(err.message || 'Failed to connect to stream');
+              onLog?.(`Error: ${err.message || 'Connection failed'}`);
+              setLoading(false);
             }
-          });
-        } catch (err: any) {
-          console.error(err);
+          }
+        })
+        .catch((importErr: any) => {
+          if (connectionTimer) clearTimeout(connectionTimer);
+          console.error('Failed to load PixelStreaming library:', importErr);
           if (retryCount < MAX_RETRIES) {
             retryCount++;
-            onLog?.(`Connection error: ${err.message}. Retry ${retryCount}/${MAX_RETRIES}...`);
+            onLog?.(
+              `Library load failed: ${importErr.message}. Retry ${retryCount}/${MAX_RETRIES}...`,
+            );
             setTimeout(() => {
               if (active) connectStream();
             }, RETRY_DELAY_MS);
           } else {
-            setError(err.message || 'Failed to connect to stream');
-            onLog?.(`Error: ${err.message || 'Connection failed'}`);
+            setError('Failed to load the streaming library');
+            onLog?.('Error: Failed to load the PixelStreaming library');
             setLoading(false);
           }
-        }
-      });
+        });
     }
 
     connectStream();
 
     return () => {
       active = false;
+      if (connectionTimer) clearTimeout(connectionTimer);
       if (streamRef.current) {
         try {
           streamRef.current.disconnect();
@@ -200,7 +268,7 @@ export default function PixelStreamPlayer({ port, isSimulated, onLog }: PixelStr
         streamRef.current = null;
       }
     };
-  }, [port, isSimulated]);
+  }, [port, isSimulated, focusContainer]);
 
   const startSimulation = () => {
     const canvas = document.createElement('canvas');
@@ -346,7 +414,7 @@ export default function PixelStreamPlayer({ port, isSimulated, onLog }: PixelStr
     const video = document.createElement('video');
     video.className = 'w-full h-full object-contain';
     video.playsInline = true;
-    video.muted = isMuted;
+    video.muted = true;
     video.autoplay = true;
 
     if (containerRef.current) {
@@ -360,26 +428,15 @@ export default function PixelStreamPlayer({ port, isSimulated, onLog }: PixelStr
     simIntervalRef.current = requestAnimationFrame(draw);
   };
 
-  const toggleMute = () => {
-    const video = containerRef.current?.querySelector('video');
-    if (video) {
-      video.muted = !video.muted;
-      setIsMuted(video.muted);
-    }
-  };
-
-  const toggleFullscreen = () => {
-    const video = containerRef.current?.querySelector('video');
-    if (video) {
-      if (video.requestFullscreen) {
-        video.requestFullscreen();
-      }
-    }
-  };
-
   if (error) {
     return (
-      <div className="w-full aspect-video bg-slate-950 flex flex-col items-center justify-center p-6 text-center border border-red-500/20 rounded-2xl animate-in fade-in duration-200">
+      <div
+        className={`bg-slate-950 flex flex-col items-center justify-center p-6 text-center animate-in fade-in duration-200 ${
+          fullscreen
+            ? 'w-screen h-screen'
+            : 'w-full aspect-video border border-red-500/20 rounded-2xl'
+        }`}
+      >
         <AlertCircle className="w-12 h-12 text-red-500 mb-3 animate-bounce" />
         <h4 className="text-white font-bold text-base">Failed to connect to stream</h4>
         <p className="text-xs text-slate-400 mt-1 max-w-sm">{error}</p>
@@ -396,34 +453,21 @@ export default function PixelStreamPlayer({ port, isSimulated, onLog }: PixelStr
   return (
     <div
       ref={containerRef}
-      className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden border border-slate-900 flex items-center justify-center group shadow-2xl"
+      tabIndex={0}
+      onMouseDown={focusContainer}
+      className={`relative bg-black overflow-hidden flex items-center justify-center outline-none ${
+        fullscreen
+          ? 'w-screen h-screen ps-fullscreen'
+          : 'w-full aspect-video rounded-2xl border border-slate-900 group shadow-2xl focus:ring-2 focus:ring-indigo-500/50'
+      }`}
     >
       {loading && !connected && (
-        <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center gap-3 z-10 animate-in fade-in duration-200">
+        <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center gap-3 z-10 animate-in fade-in duration-200 pointer-events-none">
           <RefreshCw className="w-10 h-10 text-indigo-500 animate-spin" />
           <div className="text-center">
             <p className="text-sm font-semibold text-white">Connecting WebRTC Stream...</p>
             <p className="text-xs text-slate-500 mt-1">Exchanging SDP configuration tokens</p>
           </div>
-        </div>
-      )}
-
-      {connected && (
-        <div className="absolute bottom-4 right-4 flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-300 z-20">
-          <button
-            onClick={toggleMute}
-            className="p-2.5 bg-black/60 hover:bg-black/80 text-white rounded-xl backdrop-blur-md transition-all border border-white/5"
-            title={isMuted ? 'Unmute' : 'Mute'}
-          >
-            {isMuted ? <VolumeX className="w-4 h-4" /> : <Volume2 className="w-4 h-4" />}
-          </button>
-          <button
-            onClick={toggleFullscreen}
-            className="p-2.5 bg-black/60 hover:bg-black/80 text-white rounded-xl backdrop-blur-md transition-all border border-white/5"
-            title="Fullscreen"
-          >
-            <Maximize className="w-4 h-4" />
-          </button>
         </div>
       )}
     </div>

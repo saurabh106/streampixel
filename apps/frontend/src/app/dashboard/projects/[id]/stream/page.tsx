@@ -224,8 +224,8 @@ export default function StreamPlayerPage() {
               </li>
               <li>
                 If you choose <strong>Get Share Link</strong>, any public viewer can access your
-                stream without logging in. The system automatically stops instances on idle
-                timeouts.
+                stream without logging in. Instances remain running until you explicitly stop them
+                from the dashboard.
               </li>
             </ul>
           </div>

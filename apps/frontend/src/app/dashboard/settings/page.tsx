@@ -69,7 +69,7 @@ export default function SettingsPage() {
                 htmlFor="auto-scale"
                 className="text-sm text-slate-300 font-medium cursor-pointer"
               >
-                Automatically tear down inactive streams after 15 minutes of idle.
+                Instances keep running until explicitly stopped from the dashboard.
               </label>
             </div>
           </div>
