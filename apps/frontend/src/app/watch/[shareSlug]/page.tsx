@@ -11,7 +11,7 @@ import PixelStreamPlayer, {
 export default function PublicWatchPage() {
   const { shareSlug } = useParams() as { shareSlug: string };
 
-  const [project, setProject] = useState<any>(null);
+  const [, setProject] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
   const [isSimulated, setIsSimulated] = useState(false);
   const [instancePort, setInstancePort] = useState<number | null>(null);
