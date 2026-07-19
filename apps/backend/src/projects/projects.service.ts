@@ -163,6 +163,12 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         );
       }
 
+      // Remove Windows Zone.Identifier (Mark-of-the-Web) from all extracted files.
+      // When files are saved from an HTTP upload or extracted from a downloaded archive,
+      // Windows attaches a Zone.Identifier ADS that triggers SmartScreen / "Open File" popups.
+      // This strips that marker so executables can launch without user prompts.
+      this.removeZoneIdentifier(projectDir);
+
       // Search for executable
       this.logger.log(`Scanning extracted project for Unreal Engine executable...`);
       const exeFullPath = this.findExecutable(projectDir);
@@ -822,6 +828,28 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     } catch {
       this.logger.log(`Setting executable permission on: ${filePath}`);
       fs.chmodSync(filePath, 0o755);
+    }
+  }
+
+  // Remove the Zone.Identifier alternate data stream from all files in a directory (Windows only).
+  // Windows attaches Zone.Identifier:3 ("downloaded from the internet") to files saved from
+  // HTTP uploads or extracted from downloaded archives. This causes SmartScreen / "Open File -
+  // Security Warning" popups when launching .exe files. PowerShell's Unblock-File strips this
+  // ADS cleanly and is the Microsoft-recommended approach.
+  private removeZoneIdentifier(dir: string): void {
+    if (process.platform !== 'win32') return;
+
+    try {
+      // Unblock-File -Path <dir> -Recurse removes Zone.Identifier from every file under the dir.
+      // -ErrorAction SilentlyContinue ensures we never fail the upload over a missing ADS.
+      execSync(
+        `powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command "Get-ChildItem -Path '${dir}' -Recurse -File -ErrorAction SilentlyContinue | Unblock-File"`,
+        { stdio: 'ignore', timeout: 30000 },
+      );
+      this.logger.log(`Removed Zone.Identifier (Mark-of-the-Web) from all files in ${dir}`);
+    } catch (err: any) {
+      // Non-fatal: the upload still works, but SmartScreen may prompt on launch.
+      this.logger.warn(`Could not remove Zone.Identifier from ${dir}: ${err.message}`);
     }
   }
 
