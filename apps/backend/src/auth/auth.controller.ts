@@ -48,8 +48,9 @@ export class AuthController {
     // Set HTTPOnly refresh token cookie
     response.cookie('refresh_token', refreshToken, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: false,
+      sameSite: 'lax',
+      path: '/',
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
 
@@ -65,8 +66,9 @@ export class AuthController {
     await this.authService.logout(refreshToken);
     response.clearCookie('refresh_token', {
       httpOnly: true,
-      secure: process.env.NODE_ENV === 'production',
-      sameSite: 'strict',
+      secure: false,
+      sameSite: 'lax',
+      path: '/',
     });
     return { message: 'Logged out successfully' };
   }
@@ -87,8 +89,9 @@ export class AuthController {
 
       response.cookie('refresh_token', newRefreshToken, {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
+        secure: false,
+        sameSite: 'lax',
+        path: '/',
         maxAge: 7 * 24 * 60 * 60 * 1000,
       });
 
@@ -96,8 +99,9 @@ export class AuthController {
     } catch (error) {
       response.clearCookie('refresh_token', {
         httpOnly: true,
-        secure: process.env.NODE_ENV === 'production',
-        sameSite: 'strict',
+        secure: false,
+        sameSite: 'lax',
+        path: '/',
       });
       throw error;
     }
