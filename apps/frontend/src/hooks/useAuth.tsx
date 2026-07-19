@@ -2,8 +2,16 @@
 
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import api, { setAccessToken } from '../services/api';
-import { UserDto } from '@streampixel/shared';
 import { useRouter } from 'next/navigation';
+
+interface UserDto {
+  id: string;
+  email: string;
+  name: string | null;
+  role: string;
+  createdAt: string;
+  updatedAt: string;
+}
 
 interface AuthContextType {
   user: UserDto | null;

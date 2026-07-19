@@ -4,15 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev -p 3000",
-    "prebuild": "cd ../.. && npm run build --workspace=packages/shared",
-    "build": "rm -rf .next && next build",
+    "build": "next build",
     "start": "next start",
     "lint": "next lint",
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
     "@epicgames-ps/lib-pixelstreamingfrontend-ue5.5": "^1.3.0",
-    "@streampixel/shared": "*",
     "axios": "^1.7.2",
     "clsx": "^2.1.1",
     "lucide-react": "^0.395.0",
