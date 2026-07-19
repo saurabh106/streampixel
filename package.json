@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "dev": "concurrently -n \"shared,backend,frontend\" -c \"cyan,green,blue\" \"npm run dev --workspace=packages/shared\" \"npm run dev --workspace=apps/backend\" \"npm run dev --workspace=apps/frontend\"",
-    "build": "npm run build --workspace=packages/shared && npm run build --workspace=apps/backend && npm run build --workspace=apps/frontend",
+    "build": "npm run build --workspace=apps/backend && npm run build --workspace=apps/frontend",
     "lint": "eslint \"{apps,packages}/**/*.{ts,tsx,js,jsx}\"",
     "format": "prettier --write \"{apps,packages}/**/*.{ts,tsx,js,jsx,json,md}\" --ignore-path .gitignore",
     "type-check": "npm run type-check --workspace=packages/shared && npm run type-check --workspace=apps/backend && npm run type-check --workspace=apps/frontend",
