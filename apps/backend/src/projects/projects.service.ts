@@ -55,7 +55,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     // will auto-start a fresh instance on next access.
     this.prisma.instance
       .findMany({ where: { status: 'RUNNING' } })
-      .then(async (instances) => {
+      .then(async (instances: any[]) => {
         let resetCount = 0;
         let keptCount = 0;
         for (const instance of instances) {
@@ -79,7 +79,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
           `Startup instance check: ${keptCount} kept alive, ${resetCount} marked STOPPED`,
         );
       })
-      .catch((err) => {
+      .catch((err: any) => {
         this.logger.error(`Failed to check instance states on startup: ${err.message}`);
       });
 
@@ -217,7 +217,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       orderBy: { createdAt: 'desc' },
     });
 
-    return projects.map((p) => {
+    return projects.map((p: any) => {
       const proc = this.activeProcesses.get(p.id);
       return {
         ...p,
@@ -258,7 +258,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     // so any instance still RUNNING in the DB is genuinely alive — no per-request
     // port probe needed. This keeps the fast path (instance already running) down to
     // a single DB query with no network I/O.
-    const activeInstance = project.instances?.find((i) => i.status === 'RUNNING');
+    const activeInstance = project.instances?.find((i: any) => i.status === 'RUNNING');
     if (activeInstance) {
       return {
         id: project.id,

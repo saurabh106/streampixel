@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "nest build",
+    "build": "npx prisma generate && nest build",
     "dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
@@ -29,7 +29,6 @@
     "@nestjs/swagger": "^7.3.1",
     "@prisma/client": "^5.16.1",
     "@streampixel/shared": "*",
-    "adm-zip": "^0.5.18",
     "bcrypt": "^5.1.1",
     "class-transformer": "^0.5.1",
     "class-validator": "^0.14.1",
