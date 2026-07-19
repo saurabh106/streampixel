@@ -21,7 +21,7 @@ import {
   ApiResponse as ApiSwaggerResponse,
   ApiBearerAuth,
 } from '@nestjs/swagger';
-import { UserDto } from '@streampixel/shared';
+import { UserDto } from '../common/types/shared.types';
 
 @ApiTags('Authentication')
 @Controller('auth')

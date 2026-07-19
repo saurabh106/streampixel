@@ -6,7 +6,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import * as bcrypt from 'bcrypt';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
-import { UserDto, UserRole } from '@streampixel/shared';
+import { UserDto, UserRole } from '../common/types/shared.types';
 import * as crypto from 'crypto';
 
 @Injectable()
