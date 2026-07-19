@@ -10,7 +10,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import * as path from 'path';
 import * as fs from 'fs';
 import { spawn, execSync } from 'child_process';
-import AdmZip from 'adm-zip';
+import unzipper from 'unzipper';
 import { createExtractorFromFile } from 'node-unrar-js';
 
 @Injectable()
@@ -30,7 +30,13 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       ownerId: string;
     }
   >();
-  private storagePath = path.resolve(process.cwd(), 'storage');
+  // Storage root: configurable via STORAGE_PATH env var.
+  // Defaults to /opt/streampixel/store on Linux, ./storage on other platforms.
+  private storagePath =
+    process.env.STORAGE_PATH ||
+    (process.platform === 'linux'
+      ? '/opt/streampixel/store'
+      : path.resolve(process.cwd(), 'storage'));
 
   constructor(private prisma: PrismaService) {}
 
@@ -138,18 +144,22 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         let fileCount = 0;
         for (const entry of extracted.files) {
           fileCount++;
-          if (fileCount <= 5 || entry.fileHeader.name.endsWith('.exe')) {
+          if (fileCount <= 5) {
             this.logger.debug(`Extracted: ${entry.fileHeader.name}`);
           }
         }
         this.logger.log(`RAR extraction complete — ${fileCount} files extracted to ${projectDir}`);
       } else {
         this.logger.log(`Extracting project ZIP: ${zipPath}`);
-        const zip = new AdmZip(zipPath);
-        zip.extractAllTo(projectDir, true);
-        const entries = zip.getEntries();
+        const directory = await unzipper.Open.file(zipPath);
+        const entryCount = directory.files.filter((f) => f.type === 'File').length;
+        this.logger.log(`ZIP archive contains ${entryCount} files. Starting extraction...`);
+        await directory.extract({
+          path: projectDir,
+          concurrency: 5,
+        });
         this.logger.log(
-          `ZIP extraction complete — ${entries.length} entries extracted to ${projectDir}`,
+          `ZIP extraction complete — ${entryCount} files extracted to ${projectDir}`,
         );
       }
 
@@ -167,10 +177,11 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         );
       } else {
         this.logger.warn(
-          `⚠️ No valid executable (.exe) found in the extracted project archive. ` +
+          `No valid executable found in the extracted project archive. ` +
             `The project directory was scanned recursively (excluding Engine/ subfolders) ` +
             `but no project executable was detected. ` +
-            `You will need to re-upload with a build that contains a .exe at the root level.`,
+            `On Linux, ensure the binary has the execute permission bit set. ` +
+            `You will need to re-upload with a build that contains the project binary at the expected location.`,
         );
       }
     } catch (error) {
@@ -340,6 +351,12 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       `Allocated streamerPort ${streamerPort}, playerPort ${playerPort}, sfuPort ${sfuPort} for project ${project.name}`,
     );
 
+    // NOTE: No OS-level firewall rules (e.g. netsh advfirewall on Windows) are managed here.
+    // Inbound port access is handled at the infrastructure layer — cloud provider security groups,
+    // iptables/nftables, or network policies — not by this application process.
+    // The signaling server (Wilbur) binds to 0.0.0.0 by default and expects the network layer
+    // to control external reachability of the allocated ports.
+
     // Verify signaling server is built before spawning
     const signalingDir = this.getSignalingDir();
     const jsPath = path.resolve(signalingDir, 'dist', 'index.js');
@@ -422,8 +439,8 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       // No executable was detected during upload — this is a hard error, not a simulation fallback
       this.logger.error(
         `Project "${project.name}" has no executablePath recorded. ` +
-          `The upload scan did not find a valid .exe in the archive. ` +
-          `Ensure your packaged build folder contains the project .exe at its root level.`,
+          `The upload scan did not find a valid executable in the archive. ` +
+          `Ensure your packaged build folder contains the project binary at its expected location.`,
       );
       // Clean up the signaling server we just spawned
       if (signalingProcess && signalingProcess.pid) {
@@ -431,7 +448,8 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       }
       throw new BadRequestException(
         `No Unreal Engine executable found in project "${project.name}". ` +
-          `Ensure your packaged build contains a .exe at the root level of the archive (not inside Engine/). ` +
+          `Ensure your packaged build contains a project binary at the root level of the archive (not inside Engine/). ` +
+          `On Linux, the binary must also have the execute permission bit set. ` +
           `The uploaded archive was scanned and no valid project executable was detected.`,
       );
     }
@@ -456,9 +474,12 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     // PixelStreaming2 launch flags (UE 5.4+)
     // -PixelStreamingSignallingURL is the single-flag connection string for PixelStreaming2
     // Falls back to -PixelStreamingIP/-PixelStreamingPort for older plugin versions
-    const args = [
-      '-RenderOffscreen',
-      '-AudioMixer',
+    //
+    // Platform-specific notes:
+    // - Linux headless: uses Vulkan renderer (-vulkan), no window system (-RenderOffscreen),
+    //   no audio device (-nosound). D3D12 is not available on Linux.
+    // - Windows: uses D3D12 by default, -Windowed for offscreen rendering.
+    const commonArgs = [
       `-PixelStreamingSignallingURL=ws://127.0.0.1:${streamerPort}`,
       `-PixelStreamingIP=127.0.0.1`,
       `-PixelStreamingPort=${streamerPort}`,
@@ -472,9 +493,22 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       '-ForceRes',
       '-ResX=1920',
       '-ResY=1080',
-      '-Windowed',
     ];
-    this.logger.log(`UE launch args: ${args.join(' ')}`);
+
+    const platformArgs = this.isLinux
+      ? [
+          '-RenderOffscreen', // No display server required — renders to offscreen buffer
+          '-vulkan', // Vulkan is the Linux-native GPU API (D3D12 is Windows-only)
+          '-nosound', // Headless servers lack PulseAudio/ALSA; avoids device init failures
+        ]
+      : [
+          '-AudioMixer', // Windows: required for the audio subsystem to initialize properly
+          '-RenderOffscreen',
+          '-Windowed', // Windows: create a hidden window for the D3D12 rendering context
+        ];
+
+    const args = [...commonArgs, ...platformArgs];
+    this.logger.log(`UE launch args (${process.platform}): ${args.join(' ')}`);
 
     try {
       ueProcess = spawn(absoluteExePath, args, {
@@ -517,7 +551,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       }
       throw new BadRequestException(
         `Failed to launch Unreal Engine executable: ${err.message}. ` +
-          `Ensure the .exe is a valid Windows binary and not corrupted.`,
+          `Ensure the binary is a valid ${this.isLinux ? 'Linux ELF' : 'Windows'} executable and not corrupted.`,
       );
     }
 
@@ -718,8 +752,9 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     }, 3000);
   }
 
-  // Helper: Exe exclusion list — names that are NEVER the project executable
-  private readonly EXE_EXCLUSIONS = [
+  // Binary exclusion list — filenames/substrings that are NEVER the project executable.
+  // Covers Windows .exe utilities AND Linux binaries that ship alongside UE builds.
+  private readonly BINARY_EXCLUSIONS = [
     'crashreport',
     'uninstall',
     'epicgames',
@@ -731,24 +766,78 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     'fileopenorder',
     'dotnet',
     'redist',
+    'shaders',
+    'tools',
   ];
 
-  private isExcludedExe(filename: string): boolean {
+  private isExcludedBinary(filename: string): boolean {
     const lower = filename.toLowerCase();
-    return this.EXE_EXCLUSIONS.some((excl) => lower.includes(excl));
+    return this.BINARY_EXCLUSIONS.some((excl) => lower.includes(excl));
   }
 
-  // Helper: Find the project executable. Prefers root-level .exe, never picks Engine/ exes.
+  private isLinux = process.platform === 'linux';
+
+  // Check whether a file path is a candidate executable for the current platform.
+  // Linux: file must have at least one execute permission bit set (X_OK) and must not
+  //        be a shared library (.so), script, or other non-binary file.
+  // Windows: file must end with .exe.
+  private isCandidateExecutable(filePath: string, filename: string): boolean {
+    if (this.isLinux) {
+      // Reject known non-executable file types by extension
+      const lower = filename.toLowerCase();
+      if (
+        lower.endsWith('.so') ||
+        lower.endsWith('.so.') ||
+        lower.endsWith('.sh') ||
+        lower.endsWith('.py') ||
+        lower.endsWith('.txt') ||
+        lower.endsWith('.cfg') ||
+        lower.endsWith('.ini') ||
+        lower.endsWith('.log') ||
+        lower.endsWith('.pak') ||
+        lower.endsWith('.ucas') ||
+        lower.endsWith('.utoc') ||
+        lower.endsWith('.bin') ||
+        lower.endsWith('.dat')
+      ) {
+        return false;
+      }
+      try {
+        fs.accessSync(filePath, fs.constants.X_OK);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+    // Windows: match .exe extension
+    return filename.endsWith('.exe');
+  }
+
+  // Ensure the executable has the +x permission bit set (required on Linux).
+  // Extracted ZIP/RAR archives often lose Unix permission bits.
+  private ensureExecutable(filePath: string): void {
+    if (!this.isLinux) return;
+    try {
+      fs.accessSync(filePath, fs.constants.X_OK);
+    } catch {
+      this.logger.log(`Setting executable permission on: ${filePath}`);
+      fs.chmodSync(filePath, 0o755);
+    }
+  }
+
+  // Helper: Find the project executable. On Linux, detects by X_OK permission bit.
+  // On Windows, detects by .exe extension. Prefers root-level candidates; never picks Engine/ binaries.
   private findExecutable(dir: string): string | null {
-    this.logger.log(`Scanning for executable in: ${dir}`);
+    this.logger.log(`Scanning for executable in: ${dir} (platform: ${process.platform})`);
 
     // PASS 1: Scan root directory only (non-recursive)
-    const rootExes = this.scanDirForExes(dir);
-    if (rootExes.length > 0) {
+    const rootCandidates = this.scanDirForExecutables(dir);
+    if (rootCandidates.length > 0) {
       this.logger.log(
-        `Found ${rootExes.length} executable(s) at root level: ${rootExes.map((e) => path.basename(e)).join(', ')}`,
+        `Found ${rootCandidates.length} executable(s) at root level: ${rootCandidates.map((e) => path.basename(e)).join(', ')}`,
       );
-      const selected = rootExes[0];
+      const selected = rootCandidates[0];
+      this.ensureExecutable(selected);
       this.logger.log(`Selected root-level executable: ${selected}`);
       return selected;
     }
@@ -758,12 +847,13 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     );
 
     // PASS 2: Recurse into subdirectories but SKIP anything under Engine/
-    const subExes = this.findExecutableRecursive(dir, dir);
-    if (subExes.length > 0) {
+    const subCandidates = this.findExecutableRecursive(dir, dir);
+    if (subCandidates.length > 0) {
       this.logger.log(
-        `Found ${subExes.length} executable(s) in subdirectories: ${subExes.map((e) => path.relative(dir, e)).join(', ')}`,
+        `Found ${subCandidates.length} executable(s) in subdirectories: ${subCandidates.map((e) => path.relative(dir, e)).join(', ')}`,
       );
-      const selected = subExes[0];
+      const selected = subCandidates[0];
+      this.ensureExecutable(selected);
       this.logger.log(`Selected subdirectory executable: ${selected}`);
       return selected;
     }
@@ -772,8 +862,8 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
-  // Scan a single directory (non-recursive) for .exe files
-  private scanDirForExes(dir: string): string[] {
+  // Scan a single directory (non-recursive) for candidate executables
+  private scanDirForExecutables(dir: string): string[] {
     const results: string[] = [];
     let entries: fs.Dirent[];
     try {
@@ -782,17 +872,19 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       return [];
     }
     for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith('.exe')) continue;
-      if (this.isExcludedExe(entry.name)) {
-        this.logger.debug(`Skipping excluded exe: ${entry.name}`);
+      if (!entry.isFile()) continue;
+      const fullPath = path.join(dir, entry.name);
+      if (!this.isCandidateExecutable(fullPath, entry.name)) continue;
+      if (this.isExcludedBinary(entry.name)) {
+        this.logger.debug(`Skipping excluded binary: ${entry.name}`);
         continue;
       }
-      results.push(path.join(dir, entry.name));
+      results.push(fullPath);
     }
     return results;
   }
 
-  // Recurse into subdirectories looking for exes, skipping Engine/ directories entirely
+  // Recurse into subdirectories looking for executables, skipping Engine/ directories entirely
   private findExecutableRecursive(root: string, dir: string): string[] {
     const results: string[] = [];
     let entries: fs.Dirent[];
@@ -804,16 +896,16 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        // Skip Engine/ directory entirely — those exes are UE editor/crash reporters, not the project
+        // Skip Engine/ directory entirely — those binaries are UE editor/crash reporters, not the project
         if (entry.name === 'Engine') {
           this.logger.debug(`Skipping Engine/ directory: ${fullPath}`);
           continue;
         }
         const found = this.findExecutableRecursive(root, fullPath);
         results.push(...found);
-      } else if (entry.name.endsWith('.exe')) {
-        if (this.isExcludedExe(entry.name)) {
-          this.logger.debug(`Skipping excluded exe: ${fullPath}`);
+      } else if (this.isCandidateExecutable(fullPath, entry.name)) {
+        if (this.isExcludedBinary(entry.name)) {
+          this.logger.debug(`Skipping excluded binary: ${fullPath}`);
           continue;
         }
         results.push(fullPath);
@@ -867,7 +959,12 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  // Helper: Kill a process and its children (cross-platform)
+  // Helper: Kill a process and its entire child tree.
+  // On Windows, taskkill /F /T handles recursive tree killing natively.
+  // On Linux, we walk /proc/<pid>/task/<pid>/children to find descendants,
+  // kill them bottom-up (children before parents), then kill the root.
+  // This is critical because UE and Wilbur spawn their own child processes
+  // (rendering workers, codec threads, signal handlers) that must also be stopped.
   private killProcessTree(pid: number): void {
     if (process.platform === 'win32') {
       try {
@@ -876,19 +973,56 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         try {
           process.kill(pid);
         } catch {
-          // ignore
+          // process already dead
         }
       }
-    } else {
+      return;
+    }
+
+    // Linux: recursively collect the full process tree from /proc
+    const collectChildren = (ppid: number): number[] => {
+      const children: number[] = [];
       try {
-        process.kill(-pid, 'SIGKILL');
+        const childrenFile = `/proc/${ppid}/task/${ppid}/children`;
+        const content = fs.readFileSync(childrenFile, 'utf8').trim();
+        if (content) {
+          const childPids = content
+            .split(/\s+/)
+            .map(Number)
+            .filter((n) => !isNaN(n));
+          for (const childPid of childPids) {
+            children.push(childPid);
+            // Recurse into grandchildren
+            children.push(...collectChildren(childPid));
+          }
+        }
       } catch {
+        // /proc entry may not exist if process already exited
+      }
+      return children;
+    };
+
+    try {
+      // Collect all descendants (bottom-up order doesn't matter since we have the full list)
+      const childPids = collectChildren(pid);
+
+      // Kill children first (deepest first to avoid orphaning)
+      for (const childPid of childPids.reverse()) {
         try {
-          process.kill(pid, 'SIGKILL');
+          process.kill(childPid, 'SIGKILL');
         } catch {
-          // ignore
+          // process already exited — ignore ESRCH
         }
       }
+
+      // Kill the root process last
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // process already exited
+      }
+    } catch (err) {
+      this.logger.warn(`Failed to kill process tree for PID ${pid}: ${err}`);
     }
   }
 }

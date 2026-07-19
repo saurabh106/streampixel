@@ -47,3 +47,4 @@ logs/
 
 # Storage
 /apps/backend/storage/
+/opt/streampixel/store/
