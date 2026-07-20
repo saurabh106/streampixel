@@ -26,16 +26,14 @@ export class SignalingServer {
         if (isRegistered) return;
         isRegistered = true;
         if (timeoutId) clearTimeout(timeoutId);
-        
+
         this.players.add(ws);
         // Send initial config to player (ICE servers)
         const configMsg = {
           type: 'config',
           peerConnectionOptions: {
-            iceServers: [
-              { urls: ['stun:stun.l.google.com:19302'] }
-            ]
-          }
+            iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }],
+          },
         };
         ws.send(JSON.stringify(configMsg));
         this.logger.log(`Sent WebRTC config to player ${playerId}`);
@@ -118,7 +116,10 @@ export class SignalingServer {
         }
 
         // Process identify message
-        if (parsed.type === 'identify' && (parsed.id === 'Streamer' || parsed.role === 'streamer')) {
+        if (
+          parsed.type === 'identify' &&
+          (parsed.id === 'Streamer' || parsed.role === 'streamer')
+        ) {
           registerAsStreamer();
           return;
         }
@@ -161,7 +162,9 @@ export class SignalingServer {
 
     // Handle ping/pong keepalive
     if (parsed.type === 'ping') {
-      this.logger.debug(`Responding to ping from ${sender === this.streamer ? 'streamer' : `player ${senderId}`}`);
+      this.logger.debug(
+        `Responding to ping from ${sender === this.streamer ? 'streamer' : `player ${senderId}`}`,
+      );
       sender.send(JSON.stringify({ type: 'pong' }));
       return;
     }
@@ -211,15 +214,23 @@ export class SignalingServer {
 
   private forwardRawMessage(sender: WebSocket, message: WebSocket.Data) {
     if (sender === this.streamer) {
-      const byteLen = typeof message === 'string' ? message.length : (message as any).byteLength || (message as any).length || 0;
-      this.logger.debug(`Forwarding binary message (${byteLen}B) from streamer to ${this.players.size} players`);
+      const byteLen =
+        typeof message === 'string'
+          ? message.length
+          : (message as any).byteLength || (message as any).length || 0;
+      this.logger.debug(
+        `Forwarding binary message (${byteLen}B) from streamer to ${this.players.size} players`,
+      );
       this.players.forEach((player) => {
         if (player.readyState === WebSocket.OPEN) {
           player.send(message);
         }
       });
     } else if (this.streamer && this.streamer.readyState === WebSocket.OPEN) {
-      const byteLen = typeof message === 'string' ? message.length : (message as any).byteLength || (message as any).length || 0;
+      const byteLen =
+        typeof message === 'string'
+          ? message.length
+          : (message as any).byteLength || (message as any).length || 0;
       this.logger.debug(`Forwarding binary message (${byteLen}B) from player to streamer`);
       this.streamer.send(message);
     }

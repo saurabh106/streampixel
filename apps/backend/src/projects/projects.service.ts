@@ -158,9 +158,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
           path: projectDir,
           concurrency: 5,
         });
-        this.logger.log(
-          `ZIP extraction complete — ${entryCount} files extracted to ${projectDir}`,
-        );
+        this.logger.log(`ZIP extraction complete — ${entryCount} files extracted to ${projectDir}`);
       }
 
       // Remove Windows Zone.Identifier (Mark-of-the-Web) from all extracted files.

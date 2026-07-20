@@ -6,7 +6,7 @@
 
 - daec3c0: Enforce streamer/player subscription when routing signalling messages. Previously `StreamerConnection.forwardMessage`, `StreamerConnection.onDisconnectPlayerRequest` and `SFUConnection.sendToPlayer` resolved their target via the global player registry without checking that the player was subscribed to the sending streamer/SFU. On a signalling server shared by multiple streamers this let one streamer send forged `offer`/`answer`/`iceCandidate` messages to, or disconnect, players belonging to another streamer. These paths now drop messages for players that are not in the streamer's `subscribers` set. SFU connections now register themselves as a subscriber of their upstream streamer so messages destined for the SFU continue to be forwarded.
 - Updated dependencies [daec3c0]
-    - @epicgames-ps/lib-pixelstreamingsignalling-ue5.5@3.1.1
+  - @epicgames-ps/lib-pixelstreamingsignalling-ue5.5@3.1.1
 
 ## 2.3.0
 
@@ -22,7 +22,7 @@
 - Updated dependencies [b16fd54]
 - Updated dependencies [e948750]
 - Updated dependencies [988a78c]
-    - @epicgames-ps/lib-pixelstreamingsignalling-ue5.5@3.1.0
+  - @epicgames-ps/lib-pixelstreamingsignalling-ue5.5@3.1.0
 
 ## 2.2.0
 
@@ -30,9 +30,9 @@
 
 - c85a4c9: Adds command line options to wilbur to allow for configuring the reverse proxy:
 
-    --reverse-proxy Enables reverse proxy mode. This will
-    trust the X-Forwarded-For header.
-    (default: false)
-    --reverse-proxy-num-proxies <number> Sets the number of proxies to trust.
-    This is used to calculate the real
-    client IP address. (default: 1)
+  --reverse-proxy Enables reverse proxy mode. This will
+  trust the X-Forwarded-For header.
+  (default: false)
+  --reverse-proxy-num-proxies <number> Sets the number of proxies to trust.
+  This is used to calculate the real
+  client IP address. (default: 1)

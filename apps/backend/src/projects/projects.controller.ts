@@ -31,7 +31,11 @@ export class ProjectsController {
     schema: {
       type: 'object',
       properties: {
-        file: { type: 'string', format: 'binary', description: 'Packaged UE Project ZIP or RAR archive' },
+        file: {
+          type: 'string',
+          format: 'binary',
+          description: 'Packaged UE Project ZIP or RAR archive',
+        },
         name: { type: 'string', description: 'Project Name' },
         version: { type: 'string', description: 'Unreal Engine version (e.g. UE 5.4)' },
       },
@@ -41,7 +45,7 @@ export class ProjectsController {
   @UseInterceptors(
     FileInterceptor('file', {
       limits: {
-        fileSize: 2 * 1024 * 1024 * 1024, // 2 GB
+        fileSize: 15 * 1024 * 1024 * 1024, // 15 GB
       },
     }),
   )

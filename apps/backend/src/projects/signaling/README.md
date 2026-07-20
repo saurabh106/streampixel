@@ -7,6 +7,7 @@ Wilbur is a small intermediary application that sits between streamers and other
 Differences of behaviour from the old cirrus are described [here](from_cirrus.md).
 
 ## Building
+
 Building is handled by `npm` and `tsc`. However, the easiest method to install and build everything is to invoke:
 
 ```
@@ -30,15 +31,21 @@ In the `/common`, `/Signalling`, and `/SignallingWebServer` directories (in that
 Each of these will output built files into the `build` or `dist` directory.
 
 ## Running
+
 After you have build the server you can run it with both `node` directly or the `npm start` script.
+
 ```
 npm start -- [arguments]
 ```
+
 or
+
 ```
 node dist/index.js [arguments]
 ```
+
 Invoking `npm start -- --help` or `node dist/index.js --help` will display the configuration options.
+
 ```
 Usage: node dist/index.js [options]
 
@@ -69,7 +76,9 @@ Options:
   --save                        After arguments are parsed the config.json is saved with whatever arguments were specified at launch. (default: false)
   -h, --help                    Display this help text.
 ```
+
 These CLI options can also be described in a `config.json` (default config file overridable with --config_file) by specifying the command option name and value in a simple JSON object. eg.
+
 ```
 {
 	"log_folder": "logs",
@@ -85,20 +94,27 @@ These CLI options can also be described in a `config.json` (default config file 
 	"stdin": false
 }
 ```
+
 Given these options, to start the server with the closest behaviour as the old cirrus, you would invoke,
+
 ```
 npm start -- --console_messages --https_redirect verbose --serve --log_config --http_root www --homepage player.html
 ```
+
 Note that `www` being used as the http root assumes your Frontend is in that directory.
 
 ## Development
+
 This implementation is built on the [Signalling](../Signalling) library which is supplied as a library for developing signalling applications. Visit its [documentation](../Signalling/docs) for more information.
 
 A development mode that watches for changes to libraries, frontend and source exists in this project. To utilize it you can invoke `npm run develop`. This will kick off a series of watchers that all watch the individual components of the signalling server and frontend for changes and will auto build and restart the signalling server, or in the case of frontend changes, redeploy the frontend for the signalling server to serve.
+
 #### Note
+
 By default, when the signalling server launches in this mode, the port to access the frontend changes to 1025 and so you will need to visit `http://localhost:1025` to access the frontend. This is to get around the need for elevated permissions for port 80.
 
 ### Self-signed certificates
+
 During development it may be useful to work with self-signed SSL certificates (e.g. HTTPS is required for some features like XR and microphone usage). Self signed certificates can be generated using the following instructions:
 
 1. Navigate to the `SignallingWebServer` directory.
@@ -113,6 +129,6 @@ During development it may be useful to work with self-signed SSL certificates (e
 ```
 
 ## Further Documentation
+
 - [Protocol Messages](../Common/docs/messages.md)
 - [Protocol Negotiation](../Common/docs/Protocol.md)
-

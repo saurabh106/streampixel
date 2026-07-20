@@ -446,7 +446,7 @@ Error responses:
 
 | Method | Path | Auth | Body | Response | Description |
 |--------|------|------|------|----------|-------------|
-| `POST` | `/projects/upload` | Bearer JWT | `multipart/form-data`: `file` (ZIP/RAR, max 2GB), `name`, `version` | `Project` | Upload UE build, extract, detect executable |
+| `POST` | `/projects/upload` | Bearer JWT | `multipart/form-data`: `file` (ZIP/RAR, max 15GB), `name`, `version` | `Project` | Upload UE build, extract, detect executable |
 | `GET` | `/projects` | Bearer JWT | -- | `Project[]` | List user's projects with live client counts |
 | `GET` | `/projects/:id` | Bearer JWT | -- | `Project` | Get single project with instances |
 | `DELETE` | `/projects/:id` | Bearer JWT | -- | `{ success: true }` | Delete project (stops instance, cleans files) |
@@ -514,7 +514,7 @@ This is the heart of the application. Key behaviors:
 
 #### Upload & Extraction
 
-1. Validates file is provided (ZIP or RAR, max 2GB)
+1. Validates file is provided (ZIP or RAR, max 15GB)
 2. Writes uploaded buffer to `storage/projects/{projectId}/`
 3. Detects format by extension: ZIP (`adm-zip`) or RAR (`node-unrar-js`)
 4. Extracts archive contents
