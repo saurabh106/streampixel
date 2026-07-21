@@ -34,6 +34,6 @@ COPY --from=builder /app/packages/shared/package.json ./packages/shared/package.
 COPY --from=builder /app/apps/backend/dist ./apps/backend/dist
 COPY --from=builder /app/apps/backend/package.json ./apps/backend/package.json
 COPY --from=builder /app/apps/backend/prisma ./apps/backend/prisma
-RUN npx prisma generate
+RUN npx prisma@5 generate --schema=./apps/backend/prisma/schema.prisma
 EXPOSE 5000
 CMD ["node", "apps/backend/dist/main"]
