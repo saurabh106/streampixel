@@ -29,4 +29,5 @@ COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/apps/frontend/.next ./apps/frontend/.next
 COPY --from=builder /app/apps/frontend/next.config.js ./apps/frontend/next.config.js
 EXPOSE 3000
+ENV PORT=3000
 CMD ["npm", "run", "start", "--workspace=apps/frontend"]
