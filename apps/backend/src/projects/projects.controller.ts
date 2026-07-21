@@ -52,7 +52,7 @@ export class ProjectsController {
           const storagePath =
             process.env.STORAGE_PATH ||
             (process.platform === 'linux'
-              ? '/unzip/store'
+              ? '/opt/streampixel/storage'
               : path.resolve(process.cwd(), 'storage'));
           const tempDir = path.join(storagePath, 'tmp');
           if (!fs.existsSync(tempDir)) {

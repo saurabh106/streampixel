@@ -32,9 +32,10 @@ async function bootstrap() {
 
   // CORS Config
   const corsOrigin = configService.get<string>('CORS_ORIGIN', 'http://localhost:3000');
+  const isWildcard = corsOrigin.trim() === '*';
   app.enableCors({
-    origin: corsOrigin.split(','),
-    credentials: true,
+    origin: isWildcard ? true : corsOrigin.split(','),
+    credentials: !isWildcard,
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
     allowedHeaders: 'Content-Type, Accept, Authorization',
   });
@@ -54,5 +55,22 @@ async function bootstrap() {
   await app.listen(port);
   logger.log(`Backend server started on port ${port}`);
   logger.log(`API Documentation available at: http://localhost:${port}/api/docs`);
+
+  // Graceful shutdown — clean up UE processes on SIGTERM/SIGINT (Docker stop, Ctrl+C)
+  const shutdown = async (signal: string) => {
+    logger.log(`Received ${signal}. Shutting down gracefully...`);
+    await app.close();
+    process.exit(0);
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+
+  // Prevent silent crashes from unhandled errors
+  process.on('unhandledRejection', (reason: any) => {
+    logger.error(`Unhandled Promise Rejection: ${reason?.message || reason}`, reason?.stack);
+  });
+  process.on('uncaughtException', (err: Error) => {
+    logger.error(`Uncaught Exception: ${err.message}`, err.stack);
+  });
 }
 bootstrap();

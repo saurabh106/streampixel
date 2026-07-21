@@ -31,14 +31,16 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     }
   >();
   // Storage root: configurable via STORAGE_PATH env var.
-  // Defaults to /opt/streampixel/store on Linux, ./storage on other platforms.
+  // Defaults to /opt/streampixel/storage on Linux, ./storage on other platforms.
   private storagePath =
     process.env.STORAGE_PATH ||
-    (process.platform === 'linux' ? '/unzip/store' : path.resolve(process.cwd(), 'storage'));
+    (process.platform === 'linux'
+      ? '/opt/streampixel/storage'
+      : path.resolve(process.cwd(), 'storage'));
 
   constructor(private prisma: PrismaService) {}
 
-  onModuleInit() {
+  async onModuleInit() {
     // Ensure storage folders exist
     const projectsDir = path.join(this.storagePath, 'projects');
     if (!fs.existsSync(projectsDir)) {
@@ -51,35 +53,33 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     // so the public share link continues to work without re-spawning.
     // If NOT responsive, the processes died — mark as STOPPED so getByShareSlug
     // will auto-start a fresh instance on next access.
-    this.prisma.instance
-      .findMany({ where: { status: 'RUNNING' } })
-      .then(async (instances: any[]) => {
-        let resetCount = 0;
-        let keptCount = 0;
-        for (const instance of instances) {
-          const alive = await this.checkPortStatus(instance.port, 2000);
-          if (alive) {
-            keptCount++;
-            this.logger.log(
-              `Instance ${instance.id} on port ${instance.port} is still alive — keeping RUNNING`,
-            );
-          } else {
-            await this.prisma.instance
-              .update({ where: { id: instance.id }, data: { status: 'STOPPED' } })
-              .catch(() => {});
-            await this.prisma.project
-              .update({ where: { id: instance.projectId }, data: { status: 'STOPPED' } })
-              .catch(() => {});
-            resetCount++;
-          }
+    try {
+      const instances = await this.prisma.instance.findMany({ where: { status: 'RUNNING' } });
+      let resetCount = 0;
+      let keptCount = 0;
+      for (const instance of instances) {
+        const alive = await this.checkPortStatus(instance.port, 2000);
+        if (alive) {
+          keptCount++;
+          this.logger.log(
+            `Instance ${instance.id} on port ${instance.port} is still alive — keeping RUNNING`,
+          );
+        } else {
+          await this.prisma.instance
+            .update({ where: { id: instance.id }, data: { status: 'STOPPED' } })
+            .catch(() => {});
+          await this.prisma.project
+            .update({ where: { id: instance.projectId }, data: { status: 'STOPPED' } })
+            .catch(() => {});
+          resetCount++;
         }
-        this.logger.log(
-          `Startup instance check: ${keptCount} kept alive, ${resetCount} marked STOPPED`,
-        );
-      })
-      .catch((err: any) => {
-        this.logger.error(`Failed to check instance states on startup: ${err.message}`);
-      });
+      }
+      this.logger.log(
+        `Startup instance check: ${keptCount} kept alive, ${resetCount} marked STOPPED`,
+      );
+    } catch (err: any) {
+      this.logger.error(`Failed to check instance states on startup: ${err.message}`);
+    }
 
     this.startMetricsPolling();
   }
@@ -672,7 +672,9 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         return p;
       }
     }
-    throw new Error('No free ports available in range');
+    throw new BadRequestException(
+      'No free ports available in the range 8800-9100. All ports are in use.',
+    );
   }
 
   // Helper: Find signaling server directory
@@ -688,7 +690,9 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         return p;
       }
     }
-    throw new Error('Signaling server directory with compiled dist/index.js not found');
+    throw new BadRequestException(
+      'Signaling server directory with compiled dist/index.js not found. Run the signaling server build first.',
+    );
   }
 
   // Helper: Check if a port is bound and active
