@@ -28,7 +28,7 @@ RUN mkdir -p /opt/streampixel/storage/projects /opt/streampixel/storage/tmp && \
     chmod -R 777 /opt/streampixel/storage
 WORKDIR /app
 COPY package*.json ./
-RUN npm install --omit=dev
+RUN npm install --omit=dev --ignore-scripts
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/packages/shared/package.json ./packages/shared/package.json
 COPY --from=builder /app/apps/backend/dist ./apps/backend/dist
