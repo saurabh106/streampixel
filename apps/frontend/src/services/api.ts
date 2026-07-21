@@ -6,6 +6,7 @@ const api = axios.create({
 });
 
 let isRefreshing = false;
+let isSessionExpired = false;
 let failedQueue: any[] = [];
 
 const processQueue = (error: any, token: string | null = null) => {
@@ -23,6 +24,9 @@ let cachedAccessToken: string | null = null;
 
 export const setAccessToken = (token: string | null) => {
   cachedAccessToken = token;
+  if (token) {
+    isSessionExpired = false;
+  }
 };
 
 export const getAccessToken = () => {
@@ -52,6 +56,7 @@ api.interceptors.response.use(
     if (
       error.response?.status === 401 &&
       !originalRequest._retry &&
+      !isSessionExpired &&
       !originalRequest.url?.includes('/auth/refresh') &&
       !originalRequest.url?.includes('/auth/login') &&
       !originalRequest.url?.includes('/auth/register')
@@ -89,6 +94,7 @@ api.interceptors.response.use(
       } catch (refreshError) {
         processQueue(refreshError, null);
         isRefreshing = false;
+        isSessionExpired = true;
         setAccessToken(null);
 
         if (

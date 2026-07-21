@@ -8,7 +8,9 @@ export function middleware(request: NextRequest) {
   if (pathname.startsWith('/dashboard')) {
     const hasRefreshToken = request.cookies.has('refresh_token');
 
-    if (!hasRefreshToken) {
+    // In development/Codespaces, we allow bypassing the strict cookie check to prevent
+    // browser third-party cookie restrictions from blocking the dashboard transition.
+    if (!hasRefreshToken && process.env.NODE_ENV !== 'development') {
       const loginUrl = new URL('/login', request.url);
       return NextResponse.redirect(loginUrl);
     }
@@ -18,7 +20,7 @@ export function middleware(request: NextRequest) {
   if (pathname === '/login' || pathname === '/register') {
     const hasRefreshToken = request.cookies.has('refresh_token');
 
-    if (hasRefreshToken) {
+    if (hasRefreshToken && process.env.NODE_ENV !== 'development') {
       const dashboardUrl = new URL('/dashboard', request.url);
       return NextResponse.redirect(dashboardUrl);
     }

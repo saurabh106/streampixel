@@ -23,6 +23,17 @@ import {
 } from '@nestjs/swagger';
 import { UserDto } from '../common/types/shared.types';
 
+const getCookieOptions = () => {
+  const corsOrigin = process.env.CORS_ORIGIN || 'http://localhost:3000';
+  const isSecure = corsOrigin.startsWith('https://');
+  return {
+    httpOnly: true,
+    secure: isSecure,
+    sameSite: (isSecure ? 'none' : 'lax') as 'none' | 'lax',
+    path: '/',
+  };
+};
+
 @ApiTags('Authentication')
 @Controller('auth')
 export class AuthController {
@@ -47,10 +58,7 @@ export class AuthController {
 
     // Set HTTPOnly refresh token cookie
     response.cookie('refresh_token', refreshToken, {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
-      path: '/',
+      ...getCookieOptions(),
       maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
     });
 
@@ -64,12 +72,7 @@ export class AuthController {
   async logout(@Req() request: Request, @Res({ passthrough: true }) response: Response) {
     const refreshToken = request.cookies['refresh_token'] || request.body.refreshToken;
     await this.authService.logout(refreshToken);
-    response.clearCookie('refresh_token', {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'lax',
-      path: '/',
-    });
+    response.clearCookie('refresh_token', getCookieOptions());
     return { message: 'Logged out successfully' };
   }
 
@@ -88,21 +91,13 @@ export class AuthController {
       } = await this.authService.refreshTokens(refreshToken);
 
       response.cookie('refresh_token', newRefreshToken, {
-        httpOnly: true,
-        secure: false,
-        sameSite: 'lax',
-        path: '/',
+        ...getCookieOptions(),
         maxAge: 7 * 24 * 60 * 60 * 1000,
       });
 
       return { user, accessToken };
     } catch (error) {
-      response.clearCookie('refresh_token', {
-        httpOnly: true,
-        secure: false,
-        sameSite: 'lax',
-        path: '/',
-      });
+      response.clearCookie('refresh_token', getCookieOptions());
       throw error;
     }
   }

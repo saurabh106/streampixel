@@ -34,9 +34,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   // Defaults to /opt/streampixel/store on Linux, ./storage on other platforms.
   private storagePath =
     process.env.STORAGE_PATH ||
-    (process.platform === 'linux'
-      ? '/opt/streampixel/store'
-      : path.resolve(process.cwd(), 'storage'));
+    (process.platform === 'linux' ? '/unzip/store' : path.resolve(process.cwd(), 'storage'));
 
   constructor(private prisma: PrismaService) {}
 
@@ -113,7 +111,13 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     fs.mkdirSync(projectDir, { recursive: true });
 
     const zipPath = path.join(projectDir, file.originalname);
-    fs.writeFileSync(zipPath, file.buffer);
+    if (file.path && fs.existsSync(file.path)) {
+      fs.renameSync(file.path, zipPath);
+    } else if (file.buffer) {
+      fs.writeFileSync(zipPath, file.buffer);
+    } else {
+      throw new BadRequestException('No uploaded file path or buffer found');
+    }
 
     // Save temporary record to DB
     const shareSlug = Math.random().toString(36).substring(2, 10);

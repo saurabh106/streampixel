@@ -16,6 +16,9 @@ import { GetUser } from '../common/decorators/get-user.decorator';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiConsumes, ApiBody, ApiBearerAuth } from '@nestjs/swagger';
 import { UserDto } from '../common/types/shared.types';
+import { diskStorage } from 'multer';
+import * as path from 'path';
+import * as fs from 'fs';
 
 @ApiTags('Projects')
 @ApiBearerAuth()
@@ -44,6 +47,24 @@ export class ProjectsController {
   })
   @UseInterceptors(
     FileInterceptor('file', {
+      storage: diskStorage({
+        destination: (req, file, cb) => {
+          const storagePath =
+            process.env.STORAGE_PATH ||
+            (process.platform === 'linux'
+              ? '/unzip/store'
+              : path.resolve(process.cwd(), 'storage'));
+          const tempDir = path.join(storagePath, 'tmp');
+          if (!fs.existsSync(tempDir)) {
+            fs.mkdirSync(tempDir, { recursive: true });
+          }
+          cb(null, tempDir);
+        },
+        filename: (req, file, cb) => {
+          const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+          cb(null, 'upload-' + uniqueSuffix + path.extname(file.originalname));
+        },
+      }),
       limits: {
         fileSize: 15 * 1024 * 1024 * 1024, // 15 GB
       },
@@ -59,6 +80,11 @@ export class ProjectsController {
       throw new BadRequestException('Unreal Engine project ZIP or RAR file is required');
     }
     if (!name || !version) {
+      if (file.path && fs.existsSync(file.path)) {
+        try {
+          fs.unlinkSync(file.path);
+        } catch {}
+      }
       throw new BadRequestException('Project name and engine version are required');
     }
     return this.projectsService.create(file, name, version, user.id);
