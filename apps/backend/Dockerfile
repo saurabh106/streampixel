@@ -22,8 +22,8 @@ RUN npm install
 RUN npm run build --workspace=packages/shared
 RUN cd apps/backend && npx prisma generate && npm run build
 
-FROM node:20-alpine AS production
-RUN apk add --no-cache git unzip curl openssl1.1-compat
+FROM node:20-slim AS production
+RUN apt-get update && apt-get install -y --no-install-recommends unzip curl && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /opt/streampixel/storage/projects /opt/streampixel/storage/tmp && \
     chmod -R 777 /opt/streampixel/storage
 WORKDIR /app
