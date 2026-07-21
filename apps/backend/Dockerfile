@@ -37,4 +37,4 @@ COPY --from=builder /app/apps/backend/dist ./apps/backend/dist
 COPY --from=builder /app/apps/backend/prisma ./apps/backend/prisma
 RUN npx prisma generate --schema=./apps/backend/prisma/schema.prisma
 EXPOSE 5000
-CMD ["node", "apps/backend/dist/main"]
+CMD ["sh", "-c", "npx prisma migrate deploy --schema=./apps/backend/prisma/schema.prisma && node apps/backend/dist/main"]
