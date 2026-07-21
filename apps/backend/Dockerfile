@@ -1,4 +1,5 @@
 FROM node:20-alpine AS development
+RUN apk add --no-cache git unzip curl
 WORKDIR /app
 COPY package*.json ./
 COPY tsconfig*.json ./
@@ -11,6 +12,7 @@ EXPOSE 5000
 CMD ["npm", "run", "dev", "--workspace=apps/backend"]
 
 FROM node:20-alpine AS builder
+RUN apk add --no-cache git unzip curl
 WORKDIR /app
 COPY package*.json ./
 COPY tsconfig*.json ./
@@ -21,6 +23,9 @@ RUN npm run build --workspace=packages/shared
 RUN cd apps/backend && npx prisma generate && npm run build
 
 FROM node:20-alpine AS production
+RUN apk add --no-cache git unzip curl
+RUN mkdir -p /opt/streampixel/storage/projects /opt/streampixel/storage/tmp && \
+    chmod -R 777 /opt/streampixel/storage
 WORKDIR /app
 COPY package*.json ./
 RUN npm install --omit=dev
