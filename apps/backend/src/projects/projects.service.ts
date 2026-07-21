@@ -472,6 +472,9 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       );
     }
 
+    // Double-ensure execution permissions are set on the binary before attempting to spawn
+    this.ensureExecutable(absoluteExePath);
+
     this.logger.log(`Spawning Unreal Engine executable: ${absoluteExePath}`);
     this.logger.log(`UE launch dir: ${path.dirname(absoluteExePath)}`);
 
@@ -782,8 +785,9 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   private isLinux = process.platform === 'linux';
 
   // Check whether a file path is a candidate executable for the current platform.
-  // Linux: file must have at least one execute permission bit set (X_OK) and must not
-  //        be a shared library (.so), script, or other non-binary file.
+  // Linux: file must have at least one execute permission bit set (X_OK) or must be
+  //        a Linux ELF binary (starts with \x7fELF magic bytes), and must not be
+  //        a shared library (.so), script, or other non-binary file.
   // Windows: file must end with .exe.
   private isCandidateExecutable(filePath: string, filename: string): boolean {
     if (this.isLinux) {
@@ -810,6 +814,24 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         fs.accessSync(filePath, fs.constants.X_OK);
         return true;
       } catch {
+        // If it doesn't have execution permissions, check if it's an ELF binary by reading its magic bytes.
+        try {
+          const fd = fs.openSync(filePath, 'r');
+          const buffer = Buffer.alloc(4);
+          const bytesRead = fs.readSync(fd, buffer, 0, 4, 0);
+          fs.closeSync(fd);
+          if (
+            bytesRead === 4 &&
+            buffer[0] === 0x7f &&
+            buffer[1] === 0x45 && // 'E'
+            buffer[2] === 0x4c && // 'L'
+            buffer[3] === 0x46 // 'F'
+          ) {
+            return true;
+          }
+        } catch {
+          // Ignore open/read errors (e.g. if the file is a directory or unreadable)
+        }
         return false;
       }
     }
