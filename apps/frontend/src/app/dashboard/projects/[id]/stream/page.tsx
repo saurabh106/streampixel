@@ -26,6 +26,7 @@ export default function StreamPlayerPage() {
   const [isSimulated, setIsSimulated] = useState(false);
   const [instancePort, setInstancePort] = useState<number | null>(null);
   const [copiedShare, setCopiedShare] = useState(false);
+  const [instanceError, setInstanceError] = useState<string | null>(null);
 
   const addLog = (message: string) => {
     const timestamp = new Date().toLocaleTimeString();
@@ -35,6 +36,30 @@ export default function StreamPlayerPage() {
   useEffect(() => {
     fetchProjectDetails();
   }, [id]);
+
+  // Poll instance health while running to detect crashes
+  useEffect(() => {
+    if (!project || project.status !== 'RUNNING' || !instancePort) return;
+
+    const pollInterval = setInterval(async () => {
+      try {
+        const health: any = await api.get(`/projects/${id}/health`);
+        if (health.status === 'ERROR') {
+          const errMsg = health.error || 'Unreal Engine process crashed unexpectedly';
+          setInstanceError(errMsg);
+          setError(errMsg);
+          setProject((prev: any) => ({ ...prev, status: 'STOPPED' }));
+          setInstancePort(null);
+          addLog(`Instance crashed: ${errMsg}`);
+          clearInterval(pollInterval);
+        }
+      } catch (err: any) {
+        // Ignore polling errors
+      }
+    }, 5000);
+
+    return () => clearInterval(pollInterval);
+  }, [project?.status, instancePort, id]);
 
   const fetchProjectDetails = async () => {
     try {
@@ -188,10 +213,18 @@ export default function StreamPlayerPage() {
       </div>
 
       {/* Error Bar */}
-      {error && (
+      {(error || instanceError) && (
         <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-4 flex items-center gap-3 text-sm text-red-400">
           <AlertCircle className="w-5 h-5 shrink-0" />
-          <p>{error}</p>
+          <div>
+            <p>{instanceError || error}</p>
+            {(instanceError || error)?.includes('Unreal Engine') && (
+              <p className="text-xs text-red-400/60 mt-1">
+                This usually means the UE build lacks Vulkan rendering support or is not a valid
+                Linux binary. Check the backend logs for details.
+              </p>
+            )}
+          </div>
         </div>
       )}
 

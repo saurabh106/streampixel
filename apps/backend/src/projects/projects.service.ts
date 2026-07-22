@@ -28,6 +28,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       streamerPort: number;
       clients: number;
       ownerId: string;
+      lastError?: string;
     }
   >();
   // Storage root: configurable via STORAGE_PATH env var.
@@ -430,9 +431,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
 
     const maxPlayers = project.maxCCU || 3;
     const peerOptions = JSON.stringify({
-      iceServers: [
-        { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
-      ],
+      iceServers: [{ urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] }],
     });
 
     const signalingArgs = [
@@ -604,7 +603,9 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
 
     try {
       if (isWindowsExeOnLinux) {
-        this.logger.log(`Windows .exe build detected on Linux host. Spawning via Wine: ${absoluteExePath}`);
+        this.logger.log(
+          `Windows .exe build detected on Linux host. Spawning via Wine: ${absoluteExePath}`,
+        );
         const wineBin = fs.existsSync('/usr/bin/wine64') ? 'wine64' : 'wine';
         ueProcess = spawn(wineBin, [absoluteExePath, ...args], spawnOptions);
       } else {
@@ -630,13 +631,17 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       });
 
       ueProcess.on('exit', (code: number | null, signal: string | null) => {
-        this.logger.warn(
-          `[UE-PID ${ueProcess.pid}] Unreal Engine process exited with code=${code}, signal=${signal}. Cleaning up instance...`,
-        );
-        this.activeProcesses.delete(project.id);
-        if (signalingProcess && signalingProcess.pid) {
-          this.killProcessTree(signalingProcess.pid);
+        const exitReason = `UE process exited with code=${code}, signal=${signal}`;
+        this.logger.error(`[UE-PID ${ueProcess.pid}] ${exitReason}. Marking instance as ERROR.`);
+
+        const proc = this.activeProcesses.get(project.id);
+        if (proc) {
+          proc.lastError =
+            code !== null && code !== 0
+              ? `Unreal Engine process crashed (exit code ${code}). Ensure the build is a valid Linux binary with Vulkan rendering support.`
+              : `Unreal Engine process exited unexpectedly (signal=${signal}).`;
         }
+
         this.prisma.instance
           .updateMany({
             where: { projectId: project.id, status: 'RUNNING' },
@@ -649,6 +654,18 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
             data: { status: 'STOPPED' },
           })
           .catch(() => {});
+
+        // Keep the signaling server alive briefly so connected clients can detect
+        // the disconnection gracefully rather than hitting an abrupt 1006 close.
+        // Clean it up after a short grace period.
+        if (signalingProcess && signalingProcess.pid) {
+          setTimeout(() => {
+            this.logger.log(
+              `Grace period over. Killing signaling process PID ${signalingProcess.pid} for project ${project.id}`,
+            );
+            this.killProcessTree(signalingProcess.pid);
+          }, 5000);
+        }
       });
 
       pid = ueProcess.pid;
@@ -656,7 +673,51 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         throw new Error('UE process spawned but PID is null/undefined');
       }
       this.logger.log(`Successfully spawned UE process with PID ${pid}`);
+
+      // Post-spawn health check: wait briefly and verify the UE process is still alive.
+      // UE binaries crash immediately if they lack GPU/Vulkan support, rendering libs,
+      // or if the binary is corrupt. Detecting this early gives the user a clear error
+      // instead of a silent "stream never starts" experience.
+      const HEALTH_CHECK_DELAY_MS = 5000;
+      await new Promise((resolve) => setTimeout(resolve, HEALTH_CHECK_DELAY_MS));
+
+      if (ueProcess.exitCode !== null) {
+        const exitCode = ueProcess.exitCode;
+        const proc = this.activeProcesses.get(project.id);
+        const errorMsg =
+          proc?.lastError ||
+          `Unreal Engine process exited immediately after launch (exit code ${exitCode}). ` +
+            `Ensure the packaged build is a valid Linux binary with Vulkan rendering support. ` +
+            `Check backend logs for [UE-PID ${pid}] output.`;
+        this.logger.error(`UE process health check failed: ${errorMsg}`);
+
+        // Mark instance as ERROR
+        await this.prisma.instance
+          .updateMany({
+            where: { projectId: project.id, status: 'RUNNING' },
+            data: { status: 'ERROR' },
+          })
+          .catch(() => {});
+        await this.prisma.project
+          .update({ where: { id: project.id }, data: { status: 'STOPPED' } })
+          .catch(() => {});
+
+        // Clean up signaling process
+        if (signalingProcess && signalingProcess.pid) {
+          this.killProcessTree(signalingProcess.pid);
+        }
+        this.activeProcesses.delete(project.id);
+
+        throw new BadRequestException(errorMsg);
+      }
+      this.logger.log(
+        `UE process health check passed — PID ${pid} is alive after ${HEALTH_CHECK_DELAY_MS}ms`,
+      );
     } catch (err: any) {
+      // Don't double-wrap errors that are already a clear user-facing message
+      if (err instanceof BadRequestException) {
+        throw err;
+      }
       this.logger.error(`Failed to spawn Unreal Engine process: ${err.message}`);
       if (signalingProcess && signalingProcess.pid) {
         this.killProcessTree(signalingProcess.pid);
@@ -700,6 +761,61 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       port: playerPort,
       status: 'RUNNING',
       isSimulated: false,
+    };
+  }
+
+  async getInstanceHealth(projectId: string, userId: string) {
+    const project = await this.prisma.project.findFirst({
+      where: { id: projectId, userId },
+      include: { instances: true },
+    });
+
+    if (!project) {
+      throw new NotFoundException(`Project with ID ${projectId} not found`);
+    }
+
+    const activeInstance = project.instances?.find((i: any) => i.status === 'RUNNING');
+    const proc = this.activeProcesses.get(projectId);
+
+    // Check if the UE process is still alive
+    let ueAlive = false;
+    let signalingAlive = false;
+    if (proc) {
+      ueAlive = proc.ueProcess && proc.ueProcess.exitCode === null;
+      signalingAlive = proc.signalingProcess && proc.signalingProcess.exitCode === null;
+    }
+
+    // If UE process has died but DB still shows RUNNING, fix the state
+    if (activeInstance && proc && !ueAlive) {
+      this.logger.warn(
+        `Instance ${activeInstance.id} DB says RUNNING but UE process is dead (exitCode=${proc.ueProcess?.exitCode}). Fixing state.`,
+      );
+      await this.prisma.instance
+        .update({ where: { id: activeInstance.id }, data: { status: 'ERROR' } })
+        .catch(() => {});
+      await this.prisma.project
+        .update({ where: { id: projectId }, data: { status: 'STOPPED' } })
+        .catch(() => {});
+
+      // Cleanup
+      if (proc.signalingProcess?.pid) {
+        this.killProcessTree(proc.signalingProcess.pid);
+      }
+      this.activeProcesses.delete(projectId);
+
+      return {
+        status: 'ERROR',
+        error: proc.lastError || 'Unreal Engine process crashed after startup',
+        port: activeInstance.port,
+      };
+    }
+
+    return {
+      status: activeInstance ? 'RUNNING' : project.status,
+      port: activeInstance?.port || null,
+      ueAlive,
+      signalingAlive,
+      error: proc?.lastError || null,
     };
   }
 

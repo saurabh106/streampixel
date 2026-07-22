@@ -114,6 +114,12 @@ export class ProjectsController {
     return this.projectsService.startInstance(id, user.id);
   }
 
+  @Get(':id/health')
+  @ApiOperation({ summary: 'Check health of the running instance for this project' })
+  async getInstanceHealth(@Param('id') id: string, @GetUser() user: UserDto) {
+    return this.projectsService.getInstanceHealth(id, user.id);
+  }
+
   @Post(':id/stop')
   @ApiOperation({ summary: 'Stop the running instance for this project' })
   async stopInstance(@Param('id') id: string, @GetUser() user: UserDto) {

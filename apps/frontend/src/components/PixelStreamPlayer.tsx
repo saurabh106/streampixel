@@ -128,23 +128,22 @@ export default function PixelStreamPlayer({
 
     let active = true;
     let retryCount = 0;
-    const MAX_RETRIES = 3;
-    const RETRY_DELAY_MS = 2000;
-    const CONNECTION_TIMEOUT_MS = 30000;
+    const MAX_RETRIES = 10;
+    const RETRY_DELAY_MS = 3000;
+    const CONNECTION_TIMEOUT_MS = 45000;
 
     let connectionTimer: ReturnType<typeof setTimeout> | null = null;
 
     function connectStream() {
+      if (!active) return;
+
       connectionTimer = setTimeout(() => {
         if (active && !streamRef.current) {
-          setError('Connection timed out — the stream did not initialize within 30 seconds');
+          setError('Connection timed out — the stream did not initialize within 45 seconds');
           onLog?.('Error: Connection timed out');
         }
       }, CONNECTION_TIMEOUT_MS);
 
-      // Use the module-level cache so the library is loaded in parallel with the
-      // API call that provided the port. On subsequent mounts the cached modules
-      // resolve instantly.
       preloadPixelStreamingLibrary()
         .then(({ Config, PixelStreaming }) => {
           if (!active) return;
@@ -187,13 +186,33 @@ export default function PixelStreamPlayer({
               setConnected(true);
               retryCount = 0;
               onLog?.('WebRTC Audio/Video stream connected successfully!');
-
               focusContainer();
             });
 
             stream.addEventListener('webRtcDisconnected', () => {
-              setConnected(false);
               onLog?.('Pixel Streaming connection closed');
+              if (connected) {
+                setConnected(false);
+              }
+              // If we haven't connected yet, the signaling server likely lost the UE process.
+              // Retry the connection.
+              if (!connected && active && retryCount < MAX_RETRIES) {
+                retryCount++;
+                onLog?.(
+                  `Connection lost before stream established. Retry ${retryCount}/${MAX_RETRIES}...`,
+                );
+                setTimeout(() => {
+                  if (active) {
+                    try {
+                      stream.disconnect();
+                    } catch (e) {
+                      /* ignore */
+                    }
+                    streamRef.current = null;
+                    connectStream();
+                  }
+                }, RETRY_DELAY_MS);
+              }
             });
 
             stream.addEventListener('webRtcFailed', () => {

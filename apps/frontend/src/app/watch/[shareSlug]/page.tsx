@@ -2,7 +2,7 @@
 
 import React, { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
-import { RefreshCw } from 'lucide-react';
+import { RefreshCw, AlertCircle } from 'lucide-react';
 import axios from 'axios';
 import PixelStreamPlayer, {
   preloadPixelStreamingLibrary,
@@ -18,10 +18,6 @@ export default function PublicWatchPage() {
   const [streamActive, setStreamActive] = useState(false);
 
   useEffect(() => {
-    // Kick off the PixelStreaming library import immediately — in parallel with
-    // the API call below. By the time the API response arrives and the player
-    // mounts, the library will already be loaded, saving ~0.5-2s of sequential
-    // wait time.
     preloadPixelStreamingLibrary();
 
     if (shareSlug) {
@@ -57,12 +53,18 @@ export default function PublicWatchPage() {
 
   if (error) {
     return (
-      <div className="h-screen w-screen bg-black flex items-center justify-center">
-        <div className="text-center space-y-4">
+      <div className="h-screen w-screen bg-[#070913] flex items-center justify-center">
+        <div className="text-center space-y-4 max-w-sm">
+          <AlertCircle className="w-10 h-10 text-red-500 mx-auto" />
           <p className="text-sm text-red-400">{error}</p>
+          <p className="text-xs text-slate-500">
+            The Unreal Engine instance may have crashed. Ask the stream owner to restart it.
+          </p>
           <button
             onClick={() => {
               setError(null);
+              setStreamActive(false);
+              setInstancePort(null);
               fetchSharedProject();
             }}
             className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-xs font-semibold text-white rounded-xl transition-all"
@@ -76,10 +78,11 @@ export default function PublicWatchPage() {
 
   if (!streamActive || !instancePort) {
     return (
-      <div className="h-screen w-screen bg-black flex items-center justify-center">
+      <div className="h-screen w-screen bg-[#070913] flex items-center justify-center">
         <div className="text-center space-y-3">
           <RefreshCw className="w-8 h-8 text-indigo-500 animate-spin mx-auto" />
-          <p className="text-xs text-slate-500">Connecting to stream...</p>
+          <p className="text-xs text-slate-500">Starting stream instance...</p>
+          <p className="text-[10px] text-slate-600">This may take up to 15 seconds on first load</p>
         </div>
       </div>
     );
