@@ -2,12 +2,12 @@
 
 ## What Is This Project?
 
-StreamPixel is a SaaS platform for Unreal Engine Pixel Streaming. Users upload packaged UE builds (ZIP/RAR), and the platform streams them in-browser via WebRTC. Think of it as " GeForce NOW but self-hosted for your own UE projects."
+StreamPixel is a SaaS platform for Unreal Engine Pixel Streaming. Users upload packaged UE builds (ZIP/RAR), and the platform streams them in-browser via WebRTC. Think of it as "GeForce NOW but self-hosted for your own UE projects."
 
 ## Architecture
 
 ```
-EC2 Instance (Ubuntu 24.04, IP: 13.201.4.220)
+EC2 Instance (Ubuntu 24.04, IP: 13.201.4.220, NO GPU)
 ├── Docker Compose (production)
 │   ├── streampixel_frontend  (Next.js 14, port 3000)
 │   ├── streampixel_backend   (NestJS, port 5000)
@@ -42,12 +42,15 @@ streampixel/
 4. On "Start Instance":
    a. Allocates 3 ports (streamer, player, SFU) from range 8800-9100
    b. Spawns **Wilbur signaling server** (Epic Games, v2.3.1) on those ports
-   c. Spawns the **UE executable** with flags: `-PixelStreamingSignallingURL=ws://127.0.0.1:<streamerPort> -RenderOffscreen -vulkan -nosound`
-   d. UE connects to Wilbur as a "streamer" via WebSocket
-   e. Browser connects to Wilbur as a "player" via WebSocket
-   f. Wilbur brokers WebRTC SDP exchange between UE and browser
-   g. Direct WebRTC video/audio stream flows from UE → browser
-
+   c. Finds the UE build root (walks up from binary to find `Engine/` directory)
+   d. Parses the `.sh` launcher script to extract the project name
+   e. Spawns the **UE executable** wrapped in `xvfb-run -a` with flags:
+      `ArchVizExplorer -RenderOffscreen -opengl -nosound -unattended`
+      plus Pixel Streaming connection flags
+   f. UE connects to Wilbur as a "streamer" via WebSocket
+   g. Browser connects to Wilbur as a "player" via WebSocket
+   h. Wilbur brokers WebRTC SDP exchange between UE and browser
+   i. Direct WebRTC video/audio stream flows from UE → browser
 5. Each project gets a unique `shareSlug` for public viewing (no auth required)
 6. Public viewers auto-start the instance if not running
 
@@ -60,6 +63,7 @@ streampixel/
 | Signaling | Epic Games Wilbur v2.3.1 (`@epicgames-ps/lib-pixelstreamingsignalling-ue5.5`) |
 | Streaming Client | `@epicgames-ps/lib-pixelstreamingfrontend-ue5.5` |
 | Container | Docker multi-stage builds, Docker Compose |
+| Rendering | Mesa/llvmpipe software OpenGL via `xvfb-run` (no GPU) |
 | Repo | GitHub: `saurabh106/streampixel`, branch: `development` |
 
 ---
@@ -95,162 +99,161 @@ streampixel/
 7. **Frontend UI** — Dashboard with project management, upload modal, stream viewer, public share links
 8. **PixelStreamPlayer component** — WebRTC viewer with retry logic, simulation fallback
 9. **Docker Compose** — Dev and production configurations with multi-stage Dockerfiles
-10. **Post-spawn health check** — Detects UE crashes within 5 seconds (NEW)
-11. **Frontend error handling** — Instance status polling, crash detection (NEW)
-12. **Graceful signaling cleanup** — 5s grace period before killing signaling on UE crash (NEW)
+10. **Post-spawn health check** — Detects UE crashes within 5 seconds
+11. **Frontend error handling** — Instance status polling, crash detection with descriptive messages
+12. **Graceful signaling cleanup** — 5s grace period before killing signaling on UE crash
+13. **UE stdout logging** — Promoted from DEBUG to LOG level for visibility
+14. **Instance health endpoint** — `GET /projects/:id/health` for frontend polling
 
 ---
 
-## THE CURRENT PROBLEM
+## CURRENT STATE — UE Spawn Fixes (Deployed)
 
-### Symptom
-When clicking "Start Instance" on the dashboard, the UE process crashes immediately with **exit code 1** and **zero stdout/stderr output**.
+### What We Fixed in `projects.service.ts`
 
-### Error Shown to User
+All of the following fixes have been **committed, pushed, and deployed** (as of latest Docker rebuild):
+
+#### Fix 1: Build Root Detection (`findBuildRoot()`)
+- **Problem:** Backend used `path.dirname(absoluteExePath)` which resolves to `.../Binaries/Linux/` — the wrong CWD
+- **Solution:** New `findBuildRoot()` method walks up from the binary's directory looking for a directory containing `Engine/`
+- **Result:** CWD is now `.../Linux/` (the actual UE build root), matching what the `.sh` launcher expects
+- **Log confirmation:** `UE build root (CWD): /opt/streampixel/storage/projects/Linux-1784691498882/Linux`
+
+#### Fix 2: Project Name Extraction (`parseLauncherScript()`)
+- **Problem:** Backend didn't pass the project name as the first argument. The `.sh` script does: `binary ArchVizExplorer "$@"`. Without this, UE doesn't know which uproject to load.
+- **Solution:** New `parseLauncherScript()` method reads `.sh` files in the build root and regex-matches the `Binaries... <ProjectName>` pattern
+- **Result:** `ArchVizExplorer` is now passed as the first positional arg
+- **Log confirmation:** `Parsed launcher script ArchVizExplorer.sh: project name = "ArchVizExplorer"`
+
+#### Fix 3: xvfb-run Wrapper
+- **Problem:** UE binary (even with `-RenderOffscreen`) may need an X11 display context for OpenGL initialization
+- **Solution:** On Linux, UE is now spawned via `xvfb-run -a <binary> <args>` instead of directly. `-a` auto-selects a free display number.
+- **Result:** Provides a virtual X display for the OpenGL context
+- **Log confirmation:** `Linux host: wrapping UE spawn with xvfb-run for virtual display`
+
+#### Fix 4: OpenGL Instead of Vulkan (`-opengl` replacing `-vulkan`)
+- **Problem:** `-vulkan` requires a real GPU or a fully functional Vulkan driver. The EC2 instance has no GPU, and Mesa lavapipe may not initialize properly.
+- **Solution:** Replaced `-vulkan` with `-opengl` — works with Mesa/llvmpipe software rendering on no-GPU instances
+- **Result:** UE should use software OpenGL rendering via Mesa
+
+#### Fix 5: Explicit Environment Variables
+- **Problem:** Child processes spawned via `xvfb-run` might not inherit all container env vars
+- **Solution:** All Mesa/Vulkan/GL env vars are now passed explicitly in `spawnOptions.env`:
+  - `VK_ICD_FILENAMES`, `GALLIUM_DRIVER=llvmpipe`, `MESA_GL_VERSION_OVERRIDE=4.5`, `DISPLAY=:99`
+
+#### Fix 6: xauth Package (Dockerfile)
+- **Problem:** `xvfb-run` requires `xauth` which wasn't installed in `node:20-slim`
+- **Solution:** Added `xauth` to the apt-get install line in the Dockerfile
+- **Status:** Committed and pushed, awaiting Docker rebuild on EC2
+
+### Current Spawn Command
 ```
-Unreal Engine process exited immediately after launch (exit code 1).
-Ensure the packaged build is a valid Linux binary with Vulkan rendering support.
-Check backend logs for [UE-PID xxx] output.
+xvfb-run -a /opt/streampixel/storage/projects/Linux-1784691498882/Linux/ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping \
+  ArchVizExplorer \
+  -unattended \
+  -PixelStreamingSignallingURL=ws://127.0.0.1:8800 \
+  -PixelStreamingIP=127.0.0.1 \
+  -PixelStreamingPort=8800 \
+  -PixelStreamingEncoderCodec=H264 \
+  -PixelStreamingWebRTCFps=60 \
+  -PixelStreamingEncoderMinQP=1 \
+  -PixelStreamingEncoderMaxQP=28 \
+  -PixelStreamingEncoderTargetBitrate=20000 \
+  -PixelStreamingEncoderMaxBitrate=50000 \
+  -PixelStreamingEncoderRateControl=CBR \
+  -ForceRes \
+  -ResX=1920 \
+  -ResY=1080 \
+  -RenderOffscreen \
+  -opengl \
+  -nosound
 ```
 
-### What We've Diagnosed (step by step)
-
-#### Attempt 1: `xdg-user-dir: not found`
-- **Root cause:** UE binary calls `xdg-user-dir` at startup, which is in the `xdg-user-dirs` package (NOT `xdg-utils`)
-- **Fix:** Added `xdg-user-dirs` to Dockerfile
-- **Result:** Fixed that error, but UE still crashes with exit code 1
-
-#### Attempt 2: No GPU device
-- **EC2 instance has NO GPU** — `/dev/dri/` doesn't exist
-- **Vulkan has no devices** — `vulkaninfo` shows the Vulkan loader works but there are zero GPU devices
-- **Mesa lavapipe software renderer IS installed** — `lvp_icd.x86_64.json` exists at `/usr/share/vulkan/icd.d/`
-- **Fix attempted:** Set `XDG_RUNTIME_DIR=/tmp/runtime-root`, `GALLIUM_DRIVER=llvmpipe`, `MESA_GL_VERSION_OVERRIDE=4.5` in Dockerfile, created `/tmp/runtime-root` with `chmod 1777`
-- **Result:** UE binary still crashes with exit code 1 and ZERO output
-
-#### Current State
-The UE binary (`ArchVizExplorer-Linux-Shipping`) at path:
+### Log Output from Last Successful Deploy (before xauth error)
 ```
-/opt/streampixel/storage/projects/Linux-1784691498882/Linux/ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping
+[ProjectsService] Spawning Unreal Engine executable: .../ArchVizExplorer-Linux-Shipping
+[ProjectsService] UE build root (CWD): .../Linux
+[ProjectsService] Parsed launcher script ArchVizExplorer.sh: project name = "ArchVizExplorer"
+[ProjectsService] Parsed project name from launcher: ArchVizExplorer
+[ProjectsService] UE launch args (linux): ArchVizExplorer -unattended ... -RenderOffscreen -opengl -nosound
+[ProjectsService] Linux host: wrapping UE spawn with xvfb-run for virtual display
+[ProjectsService] Successfully spawned UE process with PID 74
+[ProjectsService] [UE-PID 74][stderr]: xvfb-run: error: xauth command not found
+[ProjectsService] [UE-PID 74] UE process exited with code=3, signal=null
 ```
 
-- ✅ Is a valid Linux ELF binary (verified via `ldd` — all shared libraries resolve)
-- ✅ Has execute permissions (`-rwxr-xr-x`)
-- ✅ Runs as `node` user (UID 1000) inside container
-- ✅ `xdg-user-dir` is now installed
-- ✅ Mesa lavapipe ICD exists
-- ✅ `XDG_RUNTIME_DIR` is set
-- ❌ Produces ZERO stdout/stderr output
-- ❌ Creates NO log files in `Saved/Logs/`
-- ❌ Exits with code 1 within 1 second
-- ❌ The `.uproject` file does NOT exist in the project directory (only `Binaries/`, `Content/`, `Samples/`)
+**Exit code 3** is from `xvfb-run` itself (not from UE) — it can't run without `xauth`. The `xauth` fix is committed but the Docker image hasn't been rebuilt yet.
 
-### What We Know About the UE Build
-```
-/opt/streampixel/storage/projects/Linux-1784691498882/Linux/
-├── ArchVizExplorer.sh          # Launcher script (calls the binary with project name arg)
-├── ArchVizExplorer/
-│   ├── Binaries/Linux/
-│   │   ├── ArchVizExplorer-Linux-Shipping   # 190MB binary
-│   │   ├── libNvmlWrapper.so
-│   │   ├── libtbb.so / libtbb.so.12 / libtbb.so.12.13
-│   │   └── libtbbmalloc.so / libtbbmalloc.so.2 / libtbbmalloc.so.2.13
-│   ├── Content/                # Game content (pak files etc.)
-│   └── Samples/                # Sample content
-├── Engine/                     # UE engine files (vendored in build)
-├── Manifest_NonUFSFiles_Linux.txt
-└── Manifest_UFSFiles_Linux.txt
-```
+---
 
-The `.sh` launcher script runs:
+## NEXT STEP — Rebuild Docker Image
+
+The `xauth` package fix is committed and pushed. Run on EC2:
+
 ```bash
-chmod +x "$UE_PROJECT_ROOT/ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping"
-"$UE_PROJECT_ROOT/ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping" ArchVizExplorer "$@"
+cd /opt/streampixel
+git pull origin development
+cd infrastructure/docker
+sudo docker compose -f docker-compose.prod.yml build backend --no-cache
+sudo docker compose -f docker-compose.prod.yml up -d backend
 ```
 
-### How the Backend Spawns It
-```typescript
-const args = [
-  '-unattended',
-  `-PixelStreamingSignallingURL=ws://127.0.0.1:${streamerPort}`,
-  `-PixelStreamingIP=127.0.0.1`,
-  `-PixelStreamingPort=${streamerPort}`,
-  '-PixelStreamingEncoderCodec=H264',
-  '-RenderOffscreen',
-  '-vulkan',
-  '-nosound',
-];
-const spawnOptions = {
-  cwd: path.dirname(absoluteExePath), // = .../Binaries/Linux/
-};
-ueProcess = spawn(absoluteExePath, args, spawnOptions);
+Then start the instance and check logs:
+```bash
+sudo docker compose -f docker-compose.prod.yml logs -f backend
 ```
 
-### What We've Tried (Manual Testing Inside Container)
-
-1. **Running from `Binaries/Linux/` directory** — Exit code 1, no output
-2. **Running from `Linux/` directory (like the .sh script)** — Exit code 1, no output
-3. **Passing `ArchVizExplorer` as first arg (like the .sh script)** — Exit code 1, no output
-4. **strace** — Not available in `node:20-slim`, can't install (apt needs `libgcc-s1` dependency chain)
+**Expected outcome:** If `xvfb-run` succeeds, UE should start and either:
+- Begin outputting logs to stdout/stderr (if software rendering works)
+- Or crash with a different exit code that gives us more diagnostic info
 
 ---
 
-## LIKELY ROOT CAUSES TO INVESTIGATE
+## IF UE STILL CRASHES AFTER xauth FIX
 
-1. **Mesa lavapipe not initializing properly** — The env vars are set but the software Vulkan driver might need additional setup (e.g., `XDG_RUNTIME_DIR` pointing to an actual runtime dir with proper permissions, or a specific Mesa version that supports the Vulkan API version UE requires)
+### Fallback Options
 
-2. **UE Shipping build expects a `.uproject` file or specific directory structure** — Some UE builds require the project file to be discoverable relative to the binary
+1. **Run without xvfb-run** — Add a flag to skip xvfb-run and spawn UE directly with `-opengl -RenderOffscreen`:
+   Some UE builds work without an X display when `-RenderOffscreen` is set
 
-3. **UE needs a writable `Saved/` directory** — We created one but the binary might check for it before producing any output
+2. **Try `-vulkan` with xvfb-run** — If `-opengl` doesn't work with this particular UE build, try reverting to `-vulkan` now that xvfb provides a display
 
-4. **UE binary might need `DISPLAY` or X11 even with `-RenderOffscreen`** — Try with `xvfb-run` (Xvfb is installed in the Docker image)
-
-5. **UE binary compiled with newer glibc than the container** — `ldd` resolves libraries but there could be version-specific symbol mismatches
-
-6. **UE binary might need to run as root** — Some UE builds refuse to run as non-root, others refuse to run AS root. Currently runs as `node` (UID 1000).
-
-7. **The `-vulkan` flag might be failing because Mesa lavapipe doesn't support the Vulkan API version UE expects** — UE 5.x typically needs Vulkan 1.1+, Mesa lavapipe on Debian bookworm should support this but might not
-
----
-
-## SUGGESTED NEXT STEPS
-
-1. **Try with `xvfb-run`** (virtual framebuffer is already installed):
+3. **Check `dmesg` on EC2 host** — Look for segfaults or OOM kills:
    ```bash
-   docker exec -w /opt/streampixel/storage/projects/Linux-1784691498882/Linux streampixel_backend \
-     xvfb-run -a ./ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping \
-     ArchVizExplorer -RenderOffscreen -vulkan -nosound -unattended \
-     -PixelStreamingIP=127.0.0.1 -PixelStreamingPort=8800 2>&1
+   sudo dmesg | tail -20
    ```
 
-2. **Try with `-opengl` instead of `-vulkan`** (Mesa OpenGL works without Vulkan):
-   Change the launch args in `projects.service.ts` to use `-opengl` instead of `-vulkan`
-
-3. **Try running as root** (remove `USER node` or set `uid: 0` in compose):
-   Some UE builds need root, but UE officially says it refuses to run as root. Conflicting info.
-
-4. **Upgrade to a GPU EC2 instance** (g4dn.xlarge has NVIDIA T4):
-   This would give real Vulkan support via NVIDIA drivers instead of relying on Mesa software rendering
-
-5. **Check if this specific UE build (ArchVizExplorer) was actually packaged for Linux server/headless**:
-   The "ArchVizExplorer" sample might require a GPU. A simpler UE project without complex materials/shaders might work better with software rendering.
-
-6. **Get `strace` working** — Either build a debug Docker image with strace, or use `dmesg` / `journalctl` on the host to check for segfaults:
-   ```bash
-   dmesg | tail -20
+4. **Debug Docker image** — Build a temporary image with `strace`:
+   ```dockerfile
+   FROM streampixel_backend
+   USER root
+   RUN apt-get update && apt-get install -y strace && rm -rf /var/lib/apt/lists/*
+   USER node
    ```
+   Then run: `strace -f -o /tmp/ue_strace.log <binary> <args>`
+
+5. **Upgrade to GPU instance** — `g4dn.xlarge` has NVIDIA T4 with real Vulkan support. This eliminates all software rendering issues.
+
+6. **Test with a simpler UE project** — ArchVizExplorer has complex materials/shaders that may not work with software rendering. A blank UE project or one with minimal shaders is more likely to work.
 
 ---
 
-## KEY FILES TO MODIFY
+## KEY FILES
 
-| File | What It Does |
-|------|-------------|
-| `apps/backend/src/projects/projects.service.ts:557-584` | UE launch args (flags, working directory, spawn options) |
-| `apps/backend/src/projects/projects.service.ts:605-668` | UE process spawn + exit handler + health check |
-| `apps/backend/Dockerfile:26-39` | Production image packages + env vars for rendering |
-| `infrastructure/docker/docker-compose.prod.yml:18-40` | Backend service config (ports, volumes, env) |
+| File | Purpose |
+|------|---------|
+| `apps/backend/src/projects/projects.service.ts` | Core UE spawn logic (build root, project name, xvfb-run, args) |
+| `apps/backend/src/projects/projects.controller.ts` | Health endpoint |
+| `apps/backend/Dockerfile` | Production image (packages, env vars, xvfb, xauth) |
+| `infrastructure/docker/docker-compose.prod.yml` | Backend service config (ports, volumes, env) |
 | `apps/frontend/src/components/PixelStreamPlayer.tsx` | WebRTC viewer with retry logic |
-| `apps/frontend/src/app/dashboard/projects/[id]/stream/page.tsx` | Stream page with instance health polling |
+| `apps/frontend/src/app/dashboard/projects/[id]/stream/page.tsx` | Stream page with health polling |
+| `apps/frontend/src/app/watch/[shareSlug]/page.tsx` | Public viewer page |
+
+### EC2 Paths
+- Binary: `/opt/streampixel/storage/projects/Linux-1784691498882/Linux/ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping`
+- Launcher: `/opt/streampixel/storage/projects/Linux-1784691498882/Linux/ArchVizExplorer.sh`
+- Build root: `/opt/streampixel/storage/projects/Linux-1784691498882/Linux/`
 
 ---
 
