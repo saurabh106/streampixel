@@ -26,7 +26,8 @@ services:
     restart: always
     ports:
       - '5000:5000'
-      - '8800-9100:8800-9100'
+      - '8800-9100:8800-9100/tcp'
+      - '8800-9100:8800-9100/udp'
     volumes:
       - ../../:/app
       - /app/node_modules

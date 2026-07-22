@@ -429,6 +429,12 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     );
 
     const maxPlayers = project.maxCCU || 3;
+    const peerOptions = JSON.stringify({
+      iceServers: [
+        { urls: ['stun:stun.l.google.com:19302', 'stun:stun1.l.google.com:19302'] },
+      ],
+    });
+
     const signalingArgs = [
       jsPath,
       '--streamer_port',
@@ -444,6 +450,8 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       '--rest_api',
       '--serve',
       '--cors',
+      '--peer_options',
+      peerOptions,
     ];
 
     let signalingProcess: any;
