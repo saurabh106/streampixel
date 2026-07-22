@@ -5,7 +5,8 @@
   "description": "SaaS Platform Foundation for Unreal Engine Pixel Streaming",
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "apps/backend/src/projects/signaling"
   ],
   "scripts": {
     "dev": "concurrently -n \"shared,backend,frontend\" -c \"cyan,green,blue\" \"npm run dev --workspace=packages/shared\" \"npm run dev --workspace=apps/backend\" \"npm run dev --workspace=apps/frontend\"",
@@ -27,6 +28,7 @@
     "husky": "^9.0.11",
     "lint-staged": "^15.2.7",
     "prettier": "^3.3.2",
+    "prisma": "^5.16.1",
     "typescript": "^5.5.2"
   }
 }

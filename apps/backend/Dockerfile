@@ -35,6 +35,7 @@ RUN npm rebuild bcrypt
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/apps/backend/dist ./apps/backend/dist
 COPY --from=builder /app/apps/backend/prisma ./apps/backend/prisma
+COPY --from=builder /app/apps/backend/src/projects/signaling ./apps/backend/src/projects/signaling
 RUN npx prisma generate --schema=./apps/backend/prisma/schema.prisma
 EXPOSE 5000
 CMD ["sh", "-c", "npx prisma migrate deploy --schema=./apps/backend/prisma/schema.prisma && node apps/backend/dist/main"]

@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "private": true,
   "scripts": {
-    "build": "npx prisma generate && nest build",
+    "build:signaling": "npm run build --workspace=@epicgames-ps/wilbur",
+    "build": "npm run build:signaling && prisma generate && nest build",
     "dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main",
