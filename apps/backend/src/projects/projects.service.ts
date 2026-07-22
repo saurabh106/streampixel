@@ -543,16 +543,35 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     // Double-ensure execution permissions are set on the binary before attempting to spawn
     this.ensureExecutable(absoluteExePath);
 
+    // Find the UE build root — the directory containing Engine/ — which is the correct CWD.
+    // The .sh launcher script and UE binary both expect to run from the build root,
+    // not from Binaries/Linux/ where the binary lives.
+    const buildRoot = this.findBuildRoot(path.dirname(absoluteExePath));
+    if (!buildRoot) {
+      this.logger.warn(
+        `Could not locate build root (Engine/ directory) above ${absoluteExePath}. ` +
+          `Falling back to binary directory as CWD.`,
+      );
+    }
+    const ueCwd = buildRoot || path.dirname(absoluteExePath);
     this.logger.log(`Spawning Unreal Engine executable: ${absoluteExePath}`);
-    this.logger.log(`UE launch dir: ${path.dirname(absoluteExePath)}`);
+    this.logger.log(`UE build root (CWD): ${ueCwd}`);
+
+    // Parse the .sh launcher script to extract the project name.
+    // UE Linux builds ship with a launcher (e.g., ArchVizExplorer.sh) that passes the
+    // project name as the first argument to the binary. Without it, the binary doesn't
+    // know which uproject to load and exits immediately.
+    const projectName = this.parseLauncherScript(ueCwd);
+    this.logger.log(`Parsed project name from launcher: ${projectName || '(none)'}`);
 
     // PixelStreaming2 launch flags (UE 5.4+)
     // -PixelStreamingSignallingURL is the single-flag connection string for PixelStreaming2
     // Falls back to -PixelStreamingIP/-PixelStreamingPort for older plugin versions
     //
     // Platform-specific notes:
-    // - Linux headless: uses Vulkan renderer (-vulkan), no window system (-RenderOffscreen),
-    //   no audio device (-nosound). D3D12 is not available on Linux.
+    // - Linux headless: uses OpenGL software renderer (-opengl) via Mesa/llvmpipe,
+    //   no window system (-RenderOffscreen), no audio device (-nosound).
+    //   -vulkan requires a real GPU or Vulkan-capable driver; -opengl works with Mesa.
     // - Windows: uses D3D12 by default, -Windowed for offscreen rendering.
     const commonArgs = [
       '-unattended',
@@ -574,7 +593,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     const platformArgs = this.isLinux
       ? [
           '-RenderOffscreen', // No display server required — renders to offscreen buffer
-          '-vulkan', // Vulkan is the Linux-native GPU API (D3D12 is Windows-only)
+          '-opengl', // Software rendering via Mesa/llvmpipe — works without a real GPU
           '-nosound', // Headless servers lack PulseAudio/ALSA; avoids device init failures
         ]
       : [
@@ -583,13 +602,16 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
           '-Windowed', // Windows: create a hidden window for the D3D12 rendering context
         ];
 
-    const args = [...commonArgs, ...platformArgs];
+    // UE expects the project name as the first argument before any flags.
+    // The .sh launcher does: binary <ProjectName> "$@"
+    const positionalArgs = projectName ? [projectName] : [];
+    const args = [...positionalArgs, ...commonArgs, ...platformArgs];
     this.logger.log(`UE launch args (${process.platform}): ${args.join(' ')}`);
 
     // On Linux, if the backend process is running as root (UID 0), drop root privileges to UID/GID 1000
     // because Unreal Engine binaries explicitly refuse to run with root privileges and exit with SIGABRT.
     const spawnOptions: any = {
-      cwd: path.dirname(absoluteExePath),
+      cwd: ueCwd,
     };
     if (this.isLinux && process.getuid && process.getuid() === 0) {
       this.logger.warn(
@@ -597,6 +619,20 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       );
       spawnOptions.uid = 1000;
       spawnOptions.gid = 1000;
+    }
+
+    // Pass all required env vars explicitly so the child process inherits them
+    // even when spawned via xvfb-run or another wrapper.
+    if (this.isLinux) {
+      spawnOptions.env = {
+        ...process.env,
+        VK_ICD_FILENAMES: process.env.VK_ICD_FILENAMES || '/usr/share/vulkan/icd.d/lvp_icd.x86_64.json',
+        XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || '/tmp/runtime-root',
+        GALLIUM_DRIVER: process.env.GALLIUM_DRIVER || 'llvmpipe',
+        MESA_GL_VERSION_OVERRIDE: process.env.MESA_GL_VERSION_OVERRIDE || '4.5',
+        MESA_GL_VERSION_OVERRIDE_4: process.env.MESA_GL_VERSION_OVERRIDE_4 || '4.5',
+        DISPLAY: ':99', // xvfb-run will create this virtual display
+      };
     }
 
     const isWindowsExeOnLinux = this.isLinux && absoluteExePath.toLowerCase().endsWith('.exe');
@@ -608,6 +644,13 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         );
         const wineBin = fs.existsSync('/usr/bin/wine64') ? 'wine64' : 'wine';
         ueProcess = spawn(wineBin, [absoluteExePath, ...args], spawnOptions);
+      } else if (this.isLinux) {
+        // Wrap with xvfb-run to provide a virtual X display for the OpenGL context.
+        // -a auto-selects a free display number to avoid conflicts.
+        this.logger.log(
+          `Linux host: wrapping UE spawn with xvfb-run for virtual display`,
+        );
+        ueProcess = spawn('xvfb-run', ['-a', absoluteExePath, ...args], spawnOptions);
       } else {
         ueProcess = spawn(absoluteExePath, args, spawnOptions);
       }
@@ -1103,6 +1146,50 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       // Non-fatal: the upload still works, but SmartScreen may prompt on launch.
       this.logger.warn(`Could not remove Zone.Identifier from ${dir}: ${err.message}`);
     }
+  }
+
+  // Walk up from the binary's directory to find the UE build root.
+  // The build root is the directory containing Engine/ — e.g., Linux/ in a packaged build.
+  // UE binaries and .sh launchers expect to run from this directory.
+  private findBuildRoot(startDir: string): string | null {
+    let dir = startDir;
+    for (let i = 0; i < 10; i++) {
+      if (fs.existsSync(path.join(dir, 'Engine'))) {
+        return dir;
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break; // reached filesystem root
+      dir = parent;
+    }
+    return null;
+  }
+
+  // Parse the .sh launcher script in the build root to extract the project name.
+  // Typical content: "$SCRIPT_DIR/ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping" ArchVizExplorer "$@"
+  // The project name is the argument right after the binary path.
+  private parseLauncherScript(buildRoot: string): string | null {
+    try {
+      const entries = fs.readdirSync(buildRoot, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith('.sh')) {
+          const content = fs.readFileSync(path.join(buildRoot, entry.name), 'utf-8');
+          // Match the pattern: <binary_path> <project_name> "$@"
+          // The binary path may be quoted or use $SCRIPT_DIR
+          const match = content.match(
+            /["']?[^"']*Binaries[^"']*["']?\s+([A-Za-z_][A-Za-z0-9_]*)\s/,
+          );
+          if (match) {
+            this.logger.log(
+              `Parsed launcher script ${entry.name}: project name = "${match[1]}"`,
+            );
+            return match[1];
+          }
+        }
+      }
+    } catch (err: any) {
+      this.logger.warn(`Failed to parse launcher scripts in ${buildRoot}: ${err.message}`);
+    }
+    return null;
   }
 
   // Helper: Find the project executable. On Linux, detects by X_OK permission bit.
