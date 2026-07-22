@@ -33,6 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2 \
     && rm -rf /var/lib/apt/lists/*
 ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+ENV XDG_RUNTIME_DIR=/tmp/runtime-root
+ENV GALLIUM_DRIVER=llvmpipe
+ENV MESA_GL_VERSION_OVERRIDE=4.5
+RUN mkdir -p /tmp/runtime-root && chmod 1777 /tmp/runtime-root
 RUN mkdir -p /opt/streampixel/storage/projects /opt/streampixel/storage/tmp && \
     chown -R node:node /opt/streampixel/storage && \
     chmod -R 777 /opt/streampixel/storage
