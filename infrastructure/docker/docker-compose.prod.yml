@@ -24,6 +24,7 @@ services:
     restart: always
     ports:
       - '5000:5000'
+      - '8800-9100:8800-9100'
     volumes:
       - streampixel_storage:/opt/streampixel/storage
     environment:

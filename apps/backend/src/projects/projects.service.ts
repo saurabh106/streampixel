@@ -614,9 +614,25 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       });
 
       ueProcess.on('exit', (code: number | null, signal: string | null) => {
-        this.logger.log(
-          `[UE-PID ${ueProcess.pid}] Process exited with code=${code}, signal=${signal}`,
+        this.logger.warn(
+          `[UE-PID ${ueProcess.pid}] Unreal Engine process exited with code=${code}, signal=${signal}. Cleaning up instance...`,
         );
+        this.activeProcesses.delete(project.id);
+        if (signalingProcess && signalingProcess.pid) {
+          this.killProcessTree(signalingProcess.pid);
+        }
+        this.prisma.instance
+          .updateMany({
+            where: { projectId: project.id, status: 'RUNNING' },
+            data: { status: 'ERROR' },
+          })
+          .catch(() => {});
+        this.prisma.project
+          .update({
+            where: { id: project.id },
+            data: { status: 'STOPPED' },
+          })
+          .catch(() => {});
       });
 
       pid = ueProcess.pid;
