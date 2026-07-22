@@ -592,8 +592,16 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       spawnOptions.gid = 1000;
     }
 
+    const isWindowsExeOnLinux = this.isLinux && absoluteExePath.toLowerCase().endsWith('.exe');
+
     try {
-      ueProcess = spawn(absoluteExePath, args, spawnOptions);
+      if (isWindowsExeOnLinux) {
+        this.logger.log(`Windows .exe build detected on Linux host. Spawning via Wine: ${absoluteExePath}`);
+        const wineBin = fs.existsSync('/usr/bin/wine64') ? 'wine64' : 'wine';
+        ueProcess = spawn(wineBin, [absoluteExePath, ...args], spawnOptions);
+      } else {
+        ueProcess = spawn(absoluteExePath, args, spawnOptions);
+      }
 
       // Capture UE process stdout/stderr for debugging
       ueProcess.stdout?.on('data', (data: Buffer) => {
@@ -903,6 +911,10 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       ) {
         return false;
       }
+      // Allow .exe files on Linux for Wine compatibility (e.g., Windows builds uploaded to Linux server)
+      if (lower.endsWith('.exe')) {
+        return true;
+      }
       try {
         fs.accessSync(filePath, fs.constants.X_OK);
         return true;
@@ -923,7 +935,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
             return true;
           }
         } catch {
-          // Ignore open/read errors (e.g. if the file is a directory or unreadable)
+          // Ignore open/read errors
         }
         return false;
       }
@@ -937,10 +949,14 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   private ensureExecutable(filePath: string): void {
     if (!this.isLinux) return;
     try {
-      fs.accessSync(filePath, fs.constants.X_OK);
-    } catch {
-      this.logger.log(`Setting executable permission on: ${filePath}`);
+      const projectDir = path.dirname(filePath);
+      execSync(`chmod -R 775 "${projectDir}"`, { stdio: 'ignore' });
       fs.chmodSync(filePath, 0o755);
+      this.logger.log(`Ensured executable permissions recursively on: ${projectDir}`);
+    } catch {
+      try {
+        fs.chmodSync(filePath, 0o755);
+      } catch {}
     }
   }
 

@@ -24,7 +24,11 @@ RUN npm run build --workspace=packages/shared
 RUN cd apps/backend && npx prisma generate && npm run build
 
 FROM node:20-slim AS production
-RUN apt-get update && apt-get install -y --no-install-recommends unzip curl ca-certificates libvulkan1 vulkan-tools && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    unzip curl ca-certificates libvulkan1 vulkan-tools \
+    mesa-vulkan-drivers libgl1-mesa-dri libglx-mesa0 xvfb \
+    && rm -rf /var/lib/apt/lists/*
+ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
 RUN mkdir -p /opt/streampixel/storage/projects /opt/streampixel/storage/tmp && \
     chown -R node:node /opt/streampixel/storage && \
     chmod -R 777 /opt/streampixel/storage
