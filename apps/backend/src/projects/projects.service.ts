@@ -380,7 +380,6 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     const maxPlayers = project.maxCCU || 3;
     const signalingArgs = [
       jsPath,
-      '--no_config',
       '--streamer_port',
       streamerPort.toString(),
       '--player_port',
@@ -397,17 +396,21 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     ];
 
     let signalingProcess: any;
+    let signalingStderr = '';
+
     try {
       signalingProcess = spawn('node', signalingArgs, {
         cwd: signalingDir,
       });
 
-      // Capture logs to NestJS Logger
+      // Capture logs to NestJS Logger & buffer stderr for diagnostics
       signalingProcess.stdout?.on('data', (data: any) => {
         this.logger.debug(`[Signaling-PID ${signalingProcess.pid}]: ${data.toString().trim()}`);
       });
       signalingProcess.stderr?.on('data', (data: any) => {
-        this.logger.error(`[Signaling-PID ${signalingProcess.pid}]: ${data.toString().trim()}`);
+        const msg = data.toString().trim();
+        signalingStderr += msg + '\n';
+        this.logger.error(`[Signaling-PID ${signalingProcess.pid}]: ${msg}`);
       });
 
       this.logger.log(`Signaling server process spawned with PID ${signalingProcess.pid}`);
@@ -418,13 +421,16 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
 
     // Wait for the signaling server player port to become active
     this.logger.log(`Waiting for signaling server to bind to playerPort ${playerPort}...`);
-    const isSignalingReady = await this.checkPortStatus(playerPort, 5000);
+    const isSignalingReady = await this.checkPortStatus(playerPort, 10000);
     if (!isSignalingReady) {
-      this.logger.error(`Signaling server failed to start on port ${playerPort} in time`);
+      const errorMsg = signalingStderr.trim()
+        ? `Signaling server health check failed on playerPort ${playerPort}: ${signalingStderr.trim()}`
+        : `Signaling server health check failed on playerPort ${playerPort} (timed out after 10s)`;
+      this.logger.error(errorMsg);
       if (signalingProcess && signalingProcess.pid) {
         this.killProcessTree(signalingProcess.pid);
       }
-      throw new BadRequestException('Signaling server health check failed on playerPort');
+      throw new BadRequestException(errorMsg);
     }
     this.logger.log(
       `Signaling server TCP port ${playerPort} is bound. Verifying HTTP handler is ready...`,
