@@ -15,7 +15,7 @@ import {
   UploadCloud,
 } from 'lucide-react';
 import { useRouter } from 'next/navigation';
-import api from '../../../services/api';
+import api, { copyToClipboard } from '../../../services/api';
 
 export default function ProjectsPage() {
   const router = useRouter();
@@ -50,6 +50,35 @@ export default function ProjectsPage() {
       setError(err.message || 'Failed to fetch projects list');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleCopyShareLink = async (project: any) => {
+    try {
+      let slug = project.shareSlug;
+      if (!slug) {
+        const res: any = await api.post(`/projects/${project.id}/share-slug`);
+        slug = res?.shareSlug || res?.data?.shareSlug;
+        if (slug) {
+          setProjects((prev) =>
+            prev.map((p) => (p.id === project.id ? { ...p, shareSlug: slug } : p)),
+          );
+        }
+      }
+      if (!slug) {
+        alert('Failed to generate share link.');
+        return;
+      }
+      const origin = typeof window !== 'undefined' ? window.location.origin : '';
+      const shareUrl = `${origin}/watch/${slug}`;
+      const copied = await copyToClipboard(shareUrl);
+      if (copied) {
+        alert(`Public share link copied to clipboard!\n\n${shareUrl}`);
+      } else {
+        alert(`Share link:\n${shareUrl}`);
+      }
+    } catch (err: any) {
+      alert(`Failed to get share link: ${err.message || 'Unknown error'}`);
     }
   };
 
@@ -318,20 +347,13 @@ export default function ProjectsPage() {
                             <Play className="w-4 h-4 fill-current" />
                           </button>
                         )}
-                        {project.shareSlug && (
-                          <button
-                            onClick={() => {
-                              const origin =
-                                typeof window !== 'undefined' ? window.location.origin : '';
-                              navigator.clipboard.writeText(`${origin}/watch/${project.shareSlug}`);
-                              alert('Share link copied to clipboard!');
-                            }}
-                            title="Copy Public Share Link"
-                            className="p-2 hover:bg-indigo-500/10 text-slate-400 hover:text-indigo-400 rounded-lg transition-all"
-                          >
-                            <ExternalLink className="w-4 h-4" />
-                          </button>
-                        )}
+                        <button
+                          onClick={() => handleCopyShareLink(project)}
+                          title="Get Share Link"
+                          className="p-2 hover:bg-indigo-500/10 text-slate-400 hover:text-indigo-400 rounded-lg transition-all"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                        </button>
                         <button
                           onClick={() => deleteProject(project.id)}
                           title="Delete Project"

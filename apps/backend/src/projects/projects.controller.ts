@@ -119,4 +119,10 @@ export class ProjectsController {
   async stopInstance(@Param('id') id: string, @GetUser() user: UserDto) {
     return this.projectsService.stopInstance(id, user.id);
   }
+
+  @Post(':id/share-slug')
+  @ApiOperation({ summary: 'Generate or get the public share slug for this project' })
+  async generateShareSlug(@Param('id') id: string, @GetUser() user: UserDto) {
+    return this.projectsService.generateShareSlug(id, user.id);
+  }
 }

@@ -12,7 +12,7 @@ import {
   Info,
   Link as LinkIcon,
 } from 'lucide-react';
-import api from '../../../../../services/api';
+import api, { copyToClipboard } from '../../../../../services/api';
 import PixelStreamPlayer from '../../../../../components/PixelStreamPlayer';
 
 export default function StreamPlayerPage() {
@@ -96,13 +96,30 @@ export default function StreamPlayerPage() {
     }
   };
 
-  const copyShareLink = () => {
-    if (!project || !project.shareSlug) return;
-    const origin = typeof window !== 'undefined' ? window.location.origin : '';
-    const shareUrl = `${origin}/watch/${project.shareSlug}`;
-    navigator.clipboard.writeText(shareUrl);
-    setCopiedShare(true);
-    setTimeout(() => setCopiedShare(false), 2000);
+  const copyShareLink = async () => {
+    if (!project) return;
+    try {
+      let slug = project.shareSlug;
+      if (!slug) {
+        const res: any = await api.post(`/projects/${project.id}/share-slug`);
+        slug = res?.shareSlug || res?.data?.shareSlug;
+        if (slug) {
+          setProject((prev: any) => ({ ...prev, shareSlug: slug }));
+        }
+      }
+      if (!slug) return;
+      const origin = typeof window !== 'undefined' ? window.location.origin : '';
+      const shareUrl = `${origin}/watch/${slug}`;
+      const copied = await copyToClipboard(shareUrl);
+      if (copied) {
+        setCopiedShare(true);
+        setTimeout(() => setCopiedShare(false), 2000);
+      } else {
+        alert(`Share link:\n${shareUrl}`);
+      }
+    } catch (err: any) {
+      alert(`Error getting share link: ${err.message || 'Unknown error'}`);
+    }
   };
 
   if (loading && !project) {
@@ -138,19 +155,17 @@ export default function StreamPlayerPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          {project?.shareSlug && (
-            <button
-              onClick={copyShareLink}
-              className={`px-4 py-2 text-xs font-semibold rounded-xl border transition-all flex items-center gap-1.5 ${
-                copiedShare
-                  ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
-                  : 'bg-white/5 border-white/10 hover:border-white/20 text-slate-300 hover:text-white'
-              }`}
-            >
-              <LinkIcon className="w-3.5 h-3.5" />
-              {copiedShare ? 'Copied URL!' : 'Get Share Link'}
-            </button>
-          )}
+          <button
+            onClick={copyShareLink}
+            className={`px-4 py-2 text-xs font-semibold rounded-xl border transition-all flex items-center gap-1.5 ${
+              copiedShare
+                ? 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+                : 'bg-white/5 border-white/10 hover:border-white/20 text-slate-300 hover:text-white'
+            }`}
+          >
+            <LinkIcon className="w-3.5 h-3.5" />
+            {copiedShare ? 'Copied URL!' : 'Get Share Link'}
+          </button>
 
           {project?.status === 'RUNNING' ? (
             <button

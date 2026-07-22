@@ -212,6 +212,37 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     });
   }
 
+  private async generateUniqueShareSlug(): Promise<string> {
+    let slug = '';
+    let exists = true;
+    let attempts = 0;
+    while (exists && attempts < 10) {
+      slug = Math.random().toString(36).substring(2, 10);
+      const found = await this.prisma.project.findUnique({ where: { shareSlug: slug } });
+      if (!found) exists = false;
+      attempts++;
+    }
+    return slug;
+  }
+
+  async generateShareSlug(id: string, userId: string) {
+    const project = await this.findOne(id, userId);
+    if (project.shareSlug) {
+      return project;
+    }
+    const shareSlug = await this.generateUniqueShareSlug();
+    const updated = await this.prisma.project.update({
+      where: { id },
+      data: { shareSlug },
+      include: { instances: true },
+    });
+    const proc = this.activeProcesses.get(id);
+    return {
+      ...updated,
+      clients: proc ? proc.clients : 0,
+    };
+  }
+
   async findAll(userId: string) {
     const projects = await this.prisma.project.findMany({
       where: { userId },
@@ -219,23 +250,43 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       orderBy: { createdAt: 'desc' },
     });
 
-    return projects.map((p: any) => {
-      const proc = this.activeProcesses.get(p.id);
-      return {
-        ...p,
-        clients: proc ? proc.clients : 0,
-      };
-    });
+    return Promise.all(
+      projects.map(async (p: any) => {
+        let shareSlug = p.shareSlug;
+        if (!shareSlug) {
+          shareSlug = await this.generateUniqueShareSlug();
+          await this.prisma.project.update({
+            where: { id: p.id },
+            data: { shareSlug },
+          });
+        }
+        const proc = this.activeProcesses.get(p.id);
+        return {
+          ...p,
+          shareSlug,
+          clients: proc ? proc.clients : 0,
+        };
+      }),
+    );
   }
 
   async findOne(id: string, userId: string) {
-    const project = await this.prisma.project.findFirst({
+    let project = await this.prisma.project.findFirst({
       where: { id, userId },
       include: { instances: true },
     });
 
     if (!project) {
       throw new NotFoundException(`Project with ID ${id} not found`);
+    }
+
+    if (!project.shareSlug) {
+      const shareSlug = await this.generateUniqueShareSlug();
+      project = await this.prisma.project.update({
+        where: { id },
+        data: { shareSlug },
+        include: { instances: true },
+      });
     }
 
     const proc = this.activeProcesses.get(project.id);
