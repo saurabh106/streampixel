@@ -729,7 +729,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         const errorMsg =
           proc?.lastError ||
           `Unreal Engine process exited immediately after launch (exit code ${exitCode}). ` +
-            `Ensure the packaged build is a valid Linux binary with Vulkan rendering support. ` +
+            `Ensure the packaged build is a valid Linux binary with OpenGL rendering support. ` +
             `Check backend logs for [UE-PID ${pid}] output.`;
         this.logger.error(`UE process health check failed: ${errorMsg}`);
 
