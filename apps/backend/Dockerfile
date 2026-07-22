@@ -24,8 +24,9 @@ RUN npm run build --workspace=packages/shared
 RUN cd apps/backend && npx prisma generate && npm run build
 
 FROM node:20-slim AS production
-RUN apt-get update && apt-get install -y --no-install-recommends unzip curl && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends unzip curl ca-certificates libvulkan1 vulkan-tools && rm -rf /var/lib/apt/lists/*
 RUN mkdir -p /opt/streampixel/storage/projects /opt/streampixel/storage/tmp && \
+    chown -R node:node /opt/streampixel/storage && \
     chmod -R 777 /opt/streampixel/storage
 WORKDIR /app
 COPY package*.json ./
@@ -39,5 +40,7 @@ COPY --from=builder /app/apps/backend/dist ./apps/backend/dist
 COPY --from=builder /app/apps/backend/prisma ./apps/backend/prisma
 COPY --from=builder /app/apps/backend/src/projects/signaling ./apps/backend/src/projects/signaling
 RUN npx prisma generate --schema=./apps/backend/prisma/schema.prisma
+RUN chown -R node:node /app /opt/streampixel/storage
+USER node
 EXPOSE 5000
 CMD ["sh", "-c", "npx prisma migrate deploy --schema=./apps/backend/prisma/schema.prisma && node apps/backend/dist/main"]

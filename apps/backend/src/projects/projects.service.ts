@@ -548,6 +548,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     //   no audio device (-nosound). D3D12 is not available on Linux.
     // - Windows: uses D3D12 by default, -Windowed for offscreen rendering.
     const commonArgs = [
+      '-unattended',
       `-PixelStreamingSignallingURL=ws://127.0.0.1:${streamerPort}`,
       `-PixelStreamingIP=127.0.0.1`,
       `-PixelStreamingPort=${streamerPort}`,
@@ -578,10 +579,21 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     const args = [...commonArgs, ...platformArgs];
     this.logger.log(`UE launch args (${process.platform}): ${args.join(' ')}`);
 
+    // On Linux, if the backend process is running as root (UID 0), drop root privileges to UID/GID 1000
+    // because Unreal Engine binaries explicitly refuse to run with root privileges and exit with SIGABRT.
+    const spawnOptions: any = {
+      cwd: path.dirname(absoluteExePath),
+    };
+    if (this.isLinux && process.getuid && process.getuid() === 0) {
+      this.logger.warn(
+        `Backend is running as root (UID 0). Dropping child process privileges to UID/GID 1000 for Unreal Engine.`,
+      );
+      spawnOptions.uid = 1000;
+      spawnOptions.gid = 1000;
+    }
+
     try {
-      ueProcess = spawn(absoluteExePath, args, {
-        cwd: path.dirname(absoluteExePath),
-      });
+      ueProcess = spawn(absoluteExePath, args, spawnOptions);
 
       // Capture UE process stdout/stderr for debugging
       ueProcess.stdout?.on('data', (data: Buffer) => {
