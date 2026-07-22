@@ -612,11 +612,10 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         ueProcess = spawn(absoluteExePath, args, spawnOptions);
       }
 
-      // Capture UE process stdout/stderr for debugging
       ueProcess.stdout?.on('data', (data: Buffer) => {
         const msg = data.toString().trim();
         if (msg) {
-          this.logger.debug(`[UE-PID ${ueProcess.pid}][stdout]: ${msg}`);
+          this.logger.log(`[UE-PID ${ueProcess.pid}][stdout]: ${msg}`);
         }
       });
       ueProcess.stderr?.on('data', (data: Buffer) => {

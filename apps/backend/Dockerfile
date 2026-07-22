@@ -25,8 +25,12 @@ RUN cd apps/backend && npx prisma generate && npm run build
 
 FROM node:20-slim AS production
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    unzip curl ca-certificates libvulkan1 vulkan-tools \
-    mesa-vulkan-drivers libgl1-mesa-dri libglx-mesa0 xvfb \
+    unzip curl ca-certificates \
+    libvulkan1 vulkan-tools mesa-vulkan-drivers libgl1-mesa-dri libglx-mesa0 xvfb \
+    xdg-utils \
+    libfontconfig1 libfreetype6 libx11-6 libxcursor1 libxrandr2 libxi6 \
+    libxinerama1 libxkbcommon0 libdrm2 libegl1 libgl1-mesa-glx \
+    libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2 \
     && rm -rf /var/lib/apt/lists/*
 ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
 RUN mkdir -p /opt/streampixel/storage/projects /opt/streampixel/storage/tmp && \
