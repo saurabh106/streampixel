@@ -27,7 +27,7 @@ FROM node:20-slim AS production
 RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip curl ca-certificates \
     libvulkan1 vulkan-tools mesa-vulkan-drivers libgl1-mesa-dri libglx-mesa0 xvfb \
-    xdg-utils \
+    xdg-utils xdg-user-dirs \
     libfontconfig1 libfreetype6 libx11-6 libxcursor1 libxrandr2 libxi6 \
     libxinerama1 libxkbcommon0 libdrm2 libegl1 libgl1-mesa-glx \
     libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2 \
