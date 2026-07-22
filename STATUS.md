@@ -107,44 +107,22 @@ streampixel/
 
 ---
 
-## CURRENT STATE — UE Spawn Fixes (Deployed)
+## CURRENT STATE — xauth Fixed, UE Exits With Code 1
 
-### What We Fixed in `projects.service.ts`
+### Status: DEPLOYED & RUNNING
 
-All of the following fixes have been **committed, pushed, and deployed** (as of latest Docker rebuild):
+All previous fixes (build root, project name, xvfb-run, opengl, env vars, xauth) have been **committed, pushed, and deployed** with a full Docker rebuild on EC2.
 
-#### Fix 1: Build Root Detection (`findBuildRoot()`)
-- **Problem:** Backend used `path.dirname(absoluteExePath)` which resolves to `.../Binaries/Linux/` — the wrong CWD
-- **Solution:** New `findBuildRoot()` method walks up from the binary's directory looking for a directory containing `Engine/`
-- **Result:** CWD is now `.../Linux/` (the actual UE build root), matching what the `.sh` launcher expects
-- **Log confirmation:** `UE build root (CWD): /opt/streampixel/storage/projects/Linux-1784691498882/Linux`
+### What We Fixed (All Deployed)
 
-#### Fix 2: Project Name Extraction (`parseLauncherScript()`)
-- **Problem:** Backend didn't pass the project name as the first argument. The `.sh` script does: `binary ArchVizExplorer "$@"`. Without this, UE doesn't know which uproject to load.
-- **Solution:** New `parseLauncherScript()` method reads `.sh` files in the build root and regex-matches the `Binaries... <ProjectName>` pattern
-- **Result:** `ArchVizExplorer` is now passed as the first positional arg
-- **Log confirmation:** `Parsed launcher script ArchVizExplorer.sh: project name = "ArchVizExplorer"`
-
-#### Fix 3: xvfb-run Wrapper
-- **Problem:** UE binary (even with `-RenderOffscreen`) may need an X11 display context for OpenGL initialization
-- **Solution:** On Linux, UE is now spawned via `xvfb-run -a <binary> <args>` instead of directly. `-a` auto-selects a free display number.
-- **Result:** Provides a virtual X display for the OpenGL context
-- **Log confirmation:** `Linux host: wrapping UE spawn with xvfb-run for virtual display`
-
-#### Fix 4: OpenGL Instead of Vulkan (`-opengl` replacing `-vulkan`)
-- **Problem:** `-vulkan` requires a real GPU or a fully functional Vulkan driver. The EC2 instance has no GPU, and Mesa lavapipe may not initialize properly.
-- **Solution:** Replaced `-vulkan` with `-opengl` — works with Mesa/llvmpipe software rendering on no-GPU instances
-- **Result:** UE should use software OpenGL rendering via Mesa
-
-#### Fix 5: Explicit Environment Variables
-- **Problem:** Child processes spawned via `xvfb-run` might not inherit all container env vars
-- **Solution:** All Mesa/Vulkan/GL env vars are now passed explicitly in `spawnOptions.env`:
-  - `VK_ICD_FILENAMES`, `GALLIUM_DRIVER=llvmpipe`, `MESA_GL_VERSION_OVERRIDE=4.5`, `DISPLAY=:99`
-
-#### Fix 6: xauth Package (Dockerfile)
-- **Problem:** `xvfb-run` requires `xauth` which wasn't installed in `node:20-slim`
-- **Solution:** Added `xauth` to the apt-get install line in the Dockerfile
-- **Status:** Committed and pushed, awaiting Docker rebuild on EC2
+| # | Fix | Problem | Solution | Status |
+|---|-----|---------|----------|--------|
+| 1 | Build Root Detection (`findBuildRoot()`) | Wrong CWD (`Binaries/Linux/`) | Walk up to find `Engine/` directory | ✅ Deployed |
+| 2 | Project Name Extraction (`parseLauncherScript()`) | Missing first arg to binary | Regex-match `.sh` launcher script | ✅ Deployed |
+| 3 | xvfb-run Wrapper | No X11 display for OpenGL init | `xvfb-run -a` wraps UE spawn | ✅ Deployed |
+| 4 | OpenGL Instead of Vulkan | `-vulkan` needs real GPU | `-opengl` for Mesa/llvmpipe | ✅ Deployed |
+| 5 | Explicit Environment Variables | Child process env inheritance | Pass `VK_ICD_FILENAMES`, `GALLIUM_DRIVER`, etc. | ✅ Deployed |
+| 6 | xauth Package (Dockerfile) | `xvfb-run` requires `xauth` | Added to `apt-get install` in Dockerfile | ✅ Deployed & Rebuilt |
 
 ### Current Spawn Command
 ```
@@ -169,7 +147,7 @@ xvfb-run -a /opt/streampixel/storage/projects/Linux-1784691498882/Linux/ArchVizE
   -nosound
 ```
 
-### Log Output from Last Successful Deploy (before xauth error)
+### Log Output (After xauth Fix — Current State)
 ```
 [ProjectsService] Spawning Unreal Engine executable: .../ArchVizExplorer-Linux-Shipping
 [ProjectsService] UE build root (CWD): .../Linux
@@ -177,64 +155,101 @@ xvfb-run -a /opt/streampixel/storage/projects/Linux-1784691498882/Linux/ArchVizE
 [ProjectsService] Parsed project name from launcher: ArchVizExplorer
 [ProjectsService] UE launch args (linux): ArchVizExplorer -unattended ... -RenderOffscreen -opengl -nosound
 [ProjectsService] Linux host: wrapping UE spawn with xvfb-run for virtual display
-[ProjectsService] Successfully spawned UE process with PID 74
-[ProjectsService] [UE-PID 74][stderr]: xvfb-run: error: xauth command not found
-[ProjectsService] [UE-PID 74] UE process exited with code=3, signal=null
+[ProjectsService] Successfully spawned UE process with PID 259
+[ProjectsService] [UE-PID 259][stdout]: 5.6.1-44394996+++UE5+Release-5.6 1017 0
+[ProjectsService] [UE-PID 259] UE process exited with code=1, signal=null. Marking instance as ERROR.
+[ProjectsService] UE process health check failed: Unreal Engine process exited immediately after launch (exit code 1).
 ```
 
-**Exit code 3** is from `xvfb-run` itself (not from UE) — it can't run without `xauth`. The `xauth` fix is committed but the Docker image hasn't been rebuilt yet.
+**Key observation:** xauth fix works — no more `xvfb-run: error: xauth command not found` (exit code 3). But UE now exits with **code 1** silently after printing its version banner.
 
 ---
 
-## NEXT STEP — Rebuild Docker Image
+## CURRENT ISSUE — UE 5.6.1 Silently Exits With Code 1
 
-The `xauth` package fix is committed and pushed. Run on EC2:
+### What We Know
 
-```bash
-cd /opt/streampixel
-git pull origin development
-cd infrastructure/docker
-sudo docker compose -f docker-compose.prod.yml build backend --no-cache
-sudo docker compose -f docker-compose.prod.yml up -d backend
+1. **Binary is valid:** `ldd` shows no missing shared libraries. `file` command not available in container but binary runs and prints version.
+2. **Binary starts:** Prints `5.6.1-44394996+++UE5+Release-5.6 1017 0` then `Disabling core dumps.`
+3. **Then silently exits** with code 1 — no error on stderr, no log files created
+4. **No segfaults:** `dmesg` shows no kernel-level crashes or OOM kills
+5. **No crash dumps:** No `.log`, `.dmp`, or `CrashReport*` files created anywhere under the project directory
+6. **Shipping build:** The binary is a Shipping build which suppresses most stdout/stderr log output — errors go to files that are never created because the crash happens too early
+
+### Manual Testing Results
+
+| Test | Command | EXIT |
+|------|---------|------|
+| No xvfb-run, no flags | `DISPLAY=:99 ./binary ArchVizExplorer -unattended -RenderOffscreen -nosound` | 0 |
+| With xvfb-run, no env vars | `xvfb-run -a ./binary ArchVizExplorer -unattended -RenderOffscreen -nosound` | 1 |
+| With xvfb-run + DISPLAY=:99 | `DISPLAY=:99 xvfb-run -a ./binary ArchVizExplorer -unattended -RenderOffscreen -nosound` | 1 |
+| With xvfb-run + Vulkan/Mesa env vars | `VK_ICD_FILENAMES=... GALLIUM_DRIVER=llvmpipe ... xvfb-run -a ./binary ...` | 1 |
+| With xvfb-run + XDG_RUNTIME_DIR | `XDG_RUNTIME_DIR=/tmp/runtime-root xvfb-run -a ./binary ...` | 1 |
+| With xvfb-run + full backend args | `xvfb-run -a ./binary ArchVizExplorer -unattended -PixelStreaming... -RenderOffscreen -opengl -nosound` | 1 |
+| With timeout 15 + xvfb-run + full args | `timeout 15 xvfb-run -a ./binary ArchVizExplorer -unattended -PixelStreaming... -RenderOffscreen -opengl -nosound` | 1 |
+| Without xvfb-run, no display, full args | Same args but `DISPLAY=:99` and no xvfb-run | 0 |
+
+**Key finding:** The binary exits 0 when there's no X display running (can't render, just exits cleanly). It exits 1 when xvfb-run provides a real X display — meaning the crash happens during **OpenGL/rendering initialization**.
+
+### Build Root Directory Structure
+```
+/opt/streampixel/storage/projects/Linux-1784691498882/Linux/
+├── ArchVizExplorer/
+│   ├── Binaries/Linux/ArchVizExplorer-Linux-Shipping (190MB, +x)
+│   ├── Content/Paks/ (ArchVizExplorer-Linux.pak, .ucas, .utoc, global.ucas, .utoc)
+│   └── Samples/PixelStreaming2/WebServers/
+├── ArchVizExplorer.sh
+├── Engine/
+├── Manifest_NonUFSFiles_Linux.txt
+└── Manifest_UFSFiles_Linux.txt
 ```
 
-Then start the instance and check logs:
-```bash
-sudo docker compose -f docker-compose.prod.yml logs -f backend
-```
-
-**Expected outcome:** If `xvfb-run` succeeds, UE should start and either:
-- Begin outputting logs to stdout/stderr (if software rendering works)
-- Or crash with a different exit code that gives us more diagnostic info
+**Missing directories:** No `Config/`, no `Saved/Logs/` — UE may need these to initialize. Created `Saved/Logs/` and `Config/` manually but haven't tested yet.
 
 ---
 
-## IF UE STILL CRASHES AFTER xauth FIX
+## NEXT STEPS
+
+### Immediate: Test With Created Directories
+
+```bash
+# Create required directories
+sudo docker exec streampixel_backend sh -c "mkdir -p /opt/streampixel/storage/projects/Linux-1784691498882/Linux/Saved/Logs /opt/streampixel/storage/projects/Linux-1784691498882/Linux/Config && chown -R 1000:1000 /opt/streampixel/storage/projects/Linux-1784691498882/Linux/Saved /opt/streampixel/storage/projects/Linux-1784691498882/Linux/Config"
+
+# Test with directories created
+sudo docker exec -u 1000:1000 streampixel_backend sh -c "cd /opt/streampixel/storage/projects/Linux-1784691498882/Linux && timeout 15 xvfb-run -a ./ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping ArchVizExplorer -unattended -RenderOffscreen -nosound -log 2>&1; echo EXIT=\$?"
+```
+
+### If Still Failing — Root Cause Analysis
+
+The crash happens during **OpenGL rendering initialization** inside xvfb-run. Possible causes:
+
+1. **UE 5.6 dropped `-opengl` support** — UE5 has been transitioning to Vulkan-only. The `-opengl` flag might be silently rejected, causing the renderer to fail to initialize.
+2. **Mesa/llvmpipe OpenGL 4.5 incompatibility** — UE 5.6 may require a higher GL version or specific extensions that llvmpipe doesn't provide.
+3. **Missing Config/DefaultEngine.ini** — UE packaged builds sometimes need engine config to select the correct renderer.
+4. **`-RenderOffscreen` + xvfb conflict** — Both try to handle display; they may conflict.
 
 ### Fallback Options
 
-1. **Run without xvfb-run** — Add a flag to skip xvfb-run and spawn UE directly with `-opengl -RenderOffscreen`:
-   Some UE builds work without an X display when `-RenderOffscreen` is set
-
-2. **Try `-vulkan` with xvfb-run** — If `-opengl` doesn't work with this particular UE build, try reverting to `-vulkan` now that xvfb provides a display
-
-3. **Check `dmesg` on EC2 host** — Look for segfaults or OOM kills:
+1. **Try `-vulkan` with xvfb-run** — If `-opengl` is broken in UE 5.6, `-vulkan` with Mesa's lavapipe driver might work:
    ```bash
-   sudo dmesg | tail -20
+   sudo docker exec -u 1000:1000 streampixel_backend sh -c "cd /opt/streampixel/storage/projects/Linux-1784691498882/Linux && timeout 15 xvfb-run -a ./ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping ArchVizExplorer -unattended -RenderOffscreen -vulkan -nosound -log 2>&1; echo EXIT=\$?"
    ```
 
-4. **Debug Docker image** — Build a temporary image with `strace`:
+2. **Run without xvfb-run** — If `-RenderOffscreen` is sufficient for UE 5.6, skip xvfb entirely:
+   Modify `projects.service.ts` to spawn UE directly (no xvfb-run wrapper) on Linux.
+
+3. **Build a debug image with strace** — Add `strace` to the Dockerfile to trace the exact system call that fails:
    ```dockerfile
    FROM streampixel_backend
    USER root
    RUN apt-get update && apt-get install -y strace && rm -rf /var/lib/apt/lists/*
    USER node
    ```
-   Then run: `strace -f -o /tmp/ue_strace.log <binary> <args>`
 
-5. **Upgrade to GPU instance** — `g4dn.xlarge` has NVIDIA T4 with real Vulkan support. This eliminates all software rendering issues.
+4. **Upgrade to GPU instance** — `g4dn.xlarge` (NVIDIA T4) eliminates all software rendering issues. Real GPU = real Vulkan/OpenGL.
 
-6. **Test with a simpler UE project** — ArchVizExplorer has complex materials/shaders that may not work with software rendering. A blank UE project or one with minimal shaders is more likely to work.
+5. **Test with a simpler UE project** — ArchVizExplorer has complex materials/shaders. A blank UE project or minimal build is more likely to work with software rendering.
 
 ---
 
