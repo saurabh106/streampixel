@@ -4,6 +4,7 @@ WORKDIR /app
 COPY package*.json ./
 COPY tsconfig*.json ./
 COPY apps/backend/package*.json ./apps/backend/
+COPY apps/backend/src/projects/signaling/package*.json ./apps/backend/src/projects/signaling/
 COPY packages/shared ./packages/shared/
 RUN npm install
 COPY apps/backend ./apps/backend/
@@ -29,6 +30,7 @@ RUN mkdir -p /opt/streampixel/storage/projects /opt/streampixel/storage/tmp && \
 WORKDIR /app
 COPY package*.json ./
 COPY apps/backend/package*.json ./apps/backend/
+COPY apps/backend/src/projects/signaling/package*.json ./apps/backend/src/projects/signaling/
 COPY packages/shared/package*.json ./packages/shared/
 RUN npm install --omit=dev --ignore-scripts
 RUN npm rebuild bcrypt
