@@ -103,7 +103,7 @@ streampixel/
 | Signaling | Epic Games Wilbur v2.3.1 (`@epicgames-ps/lib-pixelstreamingsignalling-ue5.5`) |
 | Streaming Client | `@epicgames-ps/lib-pixelstreamingfrontend-ue5.5` |
 | Container | Docker multi-stage builds, Docker Compose |
-| Rendering | Mesa/llvmpipe software OpenGL via `xvfb-run` (no GPU) |
+| Rendering | Mesa/lavapipe software Vulkan via Xvfb (no GPU) |
 | Repo | GitHub: `saurabh106/streampixel`, branch: `development` |
 
 ---
@@ -180,11 +180,11 @@ streampixel/
 
 ---
 
-## CURRENT STATE — xauth Fixed, UE Exits With Code 1
+## CURRENT STATE — Vulkan Architecture, UE 5.6+ Compatible
 
 ### Status: DEPLOYED & RUNNING
 
-All previous fixes (build root, project name, xvfb-run, opengl, env vars, xauth) have been **committed, pushed, and deployed** with a full Docker rebuild on EC2.
+All fixes (build root, project name, Xvfb, Vulkan rendering, env vars, crash diagnostics) have been **committed, pushed, and deployed** with a full Docker rebuild on EC2.
 
 ### What We Fixed (All Deployed)
 
@@ -192,19 +192,17 @@ All previous fixes (build root, project name, xvfb-run, opengl, env vars, xauth)
 |---|-----|---------|----------|--------|
 | 1 | Build Root Detection (`findBuildRoot()`) | Wrong CWD (`Binaries/Linux/`) | Walk up to find `Engine/` directory | ✅ Deployed |
 | 2 | Project Name Extraction (`parseLauncherScript()`) | Missing first arg to binary | Regex-match `.sh` launcher script | ✅ Deployed |
-| 3 | xvfb-run Wrapper | No X11 display for OpenGL init | `xvfb-run -a` wraps UE spawn | ✅ Deployed |
-| 4 | OpenGL Instead of Vulkan | `-vulkan` needs real GPU | `-opengl` for Mesa/llvmpipe | ✅ Deployed |
-| 5 | Explicit Environment Variables | Child process env inheritance | Pass `VK_ICD_FILENAMES`, `GALLIUM_DRIVER`, etc. | ✅ Deployed |
+| 3 | Xvfb Virtual Display | No X11 display for rendering init | Manual Xvfb spawn on `:99` (no xvfb-run) | ✅ Deployed |
+| 4 | Vulkan Rendering (`-vulkan`) | OpenGL deprecated in UE 5.6 | `-vulkan` with Mesa lavapipe software driver | ✅ Deployed |
+| 5 | Explicit Environment Variables | Child process env inheritance | Pass `VK_ICD_FILENAMES`, `GALLIUM_DRIVER`, `MESA_LOADER_DRIVER_OVERRIDE`, etc. | ✅ Deployed |
 | 6 | xauth Package (Dockerfile) | `xvfb-run` requires `xauth` | Added to `apt-get install` in Dockerfile | ✅ Deployed & Rebuilt |
+| 7 | Crash Diagnostics (`-log`) | Shipping builds suppress all output | `-log` flag writes UE log files to `Saved/Logs/` | ✅ Deployed |
 
-### Current Spawn Command (from `projects.service.ts:576-608`)
+### Current Spawn Command (from `projects.service.ts:609-611`)
 ```
-xvfb-run -a /opt/streampixel/storage/projects/Linux-1784691498882/Linux/ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping \
-  ArchVizExplorer \
+./ArchVizExplorer.sh \
   -unattended \
   -PixelStreamingSignallingURL=ws://127.0.0.1:8800 \
-  -PixelStreamingIP=127.0.0.1 \
-  -PixelStreamingPort=8800 \
   -PixelStreamingEncoderCodec=H264 \
   -PixelStreamingWebRTCFps=60 \
   -PixelStreamingEncoderMinQP=1 \
@@ -216,13 +214,22 @@ xvfb-run -a /opt/streampixel/storage/projects/Linux-1784691498882/Linux/ArchVizE
   -ResX=1920 \
   -ResY=1080 \
   -RenderOffscreen \
-  -opengl \
-  -nosound
+  -vulkan \
+  -nosound \
+  -log
 ```
 
-Note: The `commonArgs` array (`projects.service.ts:576-591`) always includes the encoder flags above. The `platformArgs` array (`projects.service.ts:593-603`) appends platform-specific flags:
-- **Linux:** `-RenderOffscreen`, `-opengl`, `-nosound`
-- **Windows:** `-AudioMixer`, `-RenderOffscreen`, `-Windowed`
+Platform flags (`projects.service.ts:609-611`):
+- **Linux:** `-RenderOffscreen`, `-vulkan`, `-nosound`, `-log`
+- **Windows:** `-RenderOffscreen`, `-AudioMixer`, `-Windowed`, `-log`
+
+Environment variables passed to UE process (`getUEEnvironment()`):
+- `VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json` — Mesa lavapipe Vulkan ICD
+- `GALLIUM_DRIVER=llvmpipe` — Software rasterizer
+- `MESA_GL_VERSION_OVERRIDE=4.5` — GL version for compatibility
+- `MESA_LOADER_DRIVER_OVERRIDE=lvp` — Force lavapipe driver
+- `RADV_PERFTEST=gpl` — Enable GPL pipeline
+- `DISPLAY=:99` — Virtual X display from Xvfb
 
 ### Log Output (After xauth Fix — Current State)
 ```
@@ -246,12 +253,13 @@ Note: The `commonArgs` array (`projects.service.ts:576-591`) always includes the
 
 ### What We Know
 
-1. **Binary is valid:** `ldd` shows no missing shared libraries. `file` command not available in container but binary runs and prints version.
+1. **Binary is valid:** `ldd` shows no missing shared libraries. Binary runs and prints version.
 2. **Binary starts:** Prints `5.6.1-44394996+++UE5+Release-5.6 1017 0` then `Disabling core dumps.`
 3. **Then silently exits** with code 1 — no error on stderr, no log files created
 4. **No segfaults:** `dmesg` shows no kernel-level crashes or OOM kills
 5. **No crash dumps:** No `.log`, `.dmp`, or `CrashReport*` files created anywhere under the project directory
 6. **Shipping build:** The binary is a Shipping build which suppresses most stdout/stderr log output — errors go to files that are never created because the crash happens too early
+7. **New fix:** `-log` flag now forces UE to write log files to `Saved/Logs/` — re-test should reveal the actual crash reason
 
 ### Manual Testing Results
 

@@ -603,9 +603,12 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     const resolutionArgs = ['-ForceRes', '-ResX=1920', '-ResY=1080'];
 
     // Audio/platform flags — -RenderOffscreen is mandatory for headless server rendering
+    // -vulkan: UE 5.6+ requires Vulkan (OpenGL is deprecated). Mesa's lavapipe provides
+    // software Vulkan via the VK_ICD_FILENAMES env var set in getUEEnvironment().
+    // -log: forces UE to write a log file under Saved/Logs/ for crash diagnostics.
     const platformArgs = this.isLinux
-      ? ['-RenderOffscreen', '-nosound']
-      : ['-RenderOffscreen', '-AudioMixer', '-Windowed'];
+      ? ['-RenderOffscreen', '-vulkan', '-nosound', '-log']
+      : ['-RenderOffscreen', '-AudioMixer', '-Windowed', '-log'];
 
     const ueArgs = [
       '-unattended',
@@ -698,7 +701,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         if (proc) {
           proc.lastError =
             code !== null && code !== 0
-              ? `Unreal Engine process crashed (exit code ${code}). Ensure the build is a valid Linux binary with Vulkan/OpenGL rendering support.`
+              ? `Unreal Engine process crashed (exit code ${code}). Ensure the build is a valid Linux binary with Vulkan rendering support and Mesa lavapipe installed.`
               : `Unreal Engine process exited unexpectedly (signal=${signal}).`;
         }
 
@@ -767,7 +770,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         const errorMsg =
           proc?.lastError ||
           `Unreal Engine process exited immediately after launch (exit code ${exitCode}). ` +
-            `Ensure the packaged build is a valid Linux binary with OpenGL or Vulkan rendering support. ` +
+            `Ensure the packaged build is a valid Linux binary with Vulkan rendering support (Mesa lavapipe). ` +
             `Check backend logs for [UE-PID ${pid}] output.`;
         this.logger.error(`UE process health check failed: ${errorMsg}`);
 
@@ -804,7 +807,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       }
       throw new BadRequestException(
         `Failed to launch Unreal Engine executable: ${err.message}. ` +
-          `Ensure the binary is a valid ${this.isLinux ? 'Linux ELF' : 'Windows'} executable with rendering support (Vulkan or OpenGL) and not corrupted.`,
+          `Ensure the binary is a valid ${this.isLinux ? 'Linux ELF' : 'Windows'} executable with Vulkan rendering support (Mesa lavapipe on headless Linux) and not corrupted.`,
       );
     }
 
@@ -1400,6 +1403,8 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       VK_ICD_FILENAMES: '/usr/share/vulkan/icd.d/lvp_icd.x86_64.json',
       GALLIUM_DRIVER: 'llvmpipe',
       MESA_GL_VERSION_OVERRIDE: '4.5',
+      MESA_LOADER_DRIVER_OVERRIDE: 'lvp',
+      RADV_PERFTEST: 'gpl',
       XDG_RUNTIME_DIR: '/tmp/runtime-root',
       // Pass through system PATH and HOME so the child process can find system binaries
       PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',

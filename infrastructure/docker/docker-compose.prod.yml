@@ -30,11 +30,15 @@ services:
       - streampixel_storage:/opt/streampixel/storage
     environment:
       - NODE_ENV=production
+      - PORT=5000
       - STORAGE_PATH=/opt/streampixel/storage
       - DATABASE_URL=postgresql://postgres:postgres123@postgres_db:5432/streampixel?schema=public
       - CORS_ORIGIN=http://13.201.4.220:3000
-    env_file:
-      - ../../.env
+      - JWT_ACCESS_SECRET=streampixel-access-secret-change-me-in-production
+      - JWT_REFRESH_SECRET=streampixel-refresh-secret-change-me-in-production
+      - JWT_ACCESS_EXPIRATION=15m
+      - JWT_REFRESH_EXPIRATION=7d
+      - NEXT_PUBLIC_API_URL=http://13.201.4.220:5000/api/v1
     depends_on:
       postgres_db:
         condition: service_healthy
@@ -53,8 +57,6 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-    env_file:
-      - ../../.env
     depends_on:
       - backend
 
