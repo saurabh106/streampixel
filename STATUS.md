@@ -18,20 +18,60 @@ EC2 Instance (Ubuntu 24.04, IP: 13.201.4.220, NO GPU)
 ```
 streampixel/
 ├── apps/
-│   ├── backend/              # NestJS API server
-│   │   ├── src/
-│   │   │   ├── auth/         # JWT auth (register, login, refresh, logout)
-│   │   │   ├── users/        # User CRUD
-│   │   │   ├── projects/     # CORE: upload, extract, spawn UE + Wilbur signaling
-│   │   │   └── prisma/       # Prisma ORM
-│   │   ├── prisma/schema.prisma  # 4 models: User, RefreshToken, Project, Instance
-│   │   └── Dockerfile        # Multi-stage: dev/builder/production
-│   └── frontend/             # Next.js 14 (App Router)
-│       ├── src/app/dashboard/  # Authenticated UI (projects, stream, instances)
-│       ├── src/app/watch/      # Public share links
-│       ├── src/components/PixelStreamPlayer.tsx  # WebRTC viewer
-│       └── Dockerfile          # Multi-stage: dev/builder/production
-└── packages/shared/          # Shared TypeScript types
+│   ├── agent/                          # Future: local machine agent (empty scaffold)
+│   ├── backend/                        # NestJS API server
+│   │   ├── Dockerfile                  # Multi-stage: dev/builder/production
+│   │   ├── prisma/
+│   │   │   ├── schema.prisma           # 4 models: User, RefreshToken, Project, Instance
+│   │   │   └── migrations/             # 3 migrations (init, shareslug, maxccu)
+│   │   └── src/
+│   │       ├── main.ts                 # Bootstrap: Swagger, CORS, validation, prefix /api/v1
+│   │       ├── app.module.ts           # Root module
+│   │       ├── app.controller.ts       # Root `/` endpoint
+│   │       ├── health.controller.ts    # `/health` endpoint
+│   │       ├── auth/                   # JWT auth (register, login, refresh, logout, me)
+│   │       │   ├── strategies/         # Passport JWT strategy
+│   │       │   └── dto/                # RegisterDto, LoginDto (class-validator)
+│   │       ├── users/                  # User CRUD (findByEmail, findById, create)
+│   │       ├── projects/               # CORE: upload, extract, spawn UE + Wilbur signaling
+│   │       │   ├── signaling-server.ts # Legacy custom WebSocket signaling (unused in prod)
+│   │       │   └── signaling/          # Embedded Epic Games Wilbur v2.3.1
+│   │       ├── prisma/                 # @Global() PrismaModule + PrismaService
+│   │       └── common/
+│   │           ├── guards/             # JwtAuthGuard
+│   │           ├── filters/            # HttpExceptionFilter (error envelope)
+│   │           ├── interceptors/       # TransformInterceptor (success envelope)
+│   │           ├── decorators/         # @GetUser() parameter decorator
+│   │           └── types/              # shared.types.ts (local copy of shared types)
+│   └── frontend/                       # Next.js 14 (App Router)
+│       ├── Dockerfile                  # Multi-stage: dev/builder/production
+│       └── src/
+│           ├── middleware.ts           # Route guard: /dashboard requires refresh_token cookie
+│           ├── services/api.ts         # Axios client: auto token refresh with queue pattern
+│           ├── hooks/useAuth.tsx        # React Context: login, register, logout, refreshUser
+│           ├── components/             # PixelStreamPlayer.tsx (WebRTC viewer + simulation)
+│           └── app/
+│               ├── page.tsx            # Marketing landing page (Server Component)
+│               ├── login/              # Login form
+│               ├── register/           # Registration form
+│               ├── watch/[shareSlug]/  # Public stream viewer (no auth, auto-starts)
+│               └── dashboard/          # Authenticated UI
+│                   ├── layout.tsx      # Sidebar + top header + user dropdown
+│                   ├── projects/       # Project list, upload modal, stream viewer
+│                   ├── instances/      # Live CCU analytics (polls every 3s)
+│                   ├── deployments/    # Placeholder (mock data)
+│                   ├── storage/        # Placeholder (mock data)
+│                   ├── settings/       # Static form (no backend persistence)
+│                   └── profile/        # User profile (read-only)
+├── packages/shared/                    # @streampixel/shared (UserRole, ApiResponse, UserDto, AuthResponseDto)
+├── infrastructure/
+│   └── docker/
+│       ├── docker-compose.yml          # Dev: postgres_db, backend, frontend
+│       ├── docker-compose.prod.yml     # Production: production targets, EC2 IP hardcoded
+│       └── setup-storage.sh            # Storage directory setup script
+├── .env.example                        # Template with documented variables
+├── tsconfig.base.json                  # Shared TS config (apps extend this)
+└── package.json                        # Monorepo root (npm workspaces)
 ```
 
 ### How Streaming Works (the flow)
@@ -79,31 +119,64 @@ streampixel/
 - **Dockerfile base:** `node:20-slim` (Debian bookworm) for production
 
 ### Ports Exposed
-| Port | Service |
-|------|---------|
-| 3000 | Frontend (Next.js) |
-| 5000 | Backend (NestJS API) |
-| 5434 | PostgreSQL |
-| 8800-9100 | Signaling servers (per instance, 3 ports each) |
+| Port | Service | Notes |
+|------|---------|-------|
+| 3000 | Frontend (Next.js) | Both dev and prod |
+| 5000 | Backend (NestJS API) | Both dev and prod |
+| 5434 | PostgreSQL (dev only) | `docker-compose.yml` maps 5434:5432. **Production** `docker-compose.prod.yml` does NOT expose PostgreSQL — only accessible within Docker network via `postgres_db:5432` |
+| 8800-9100 | Signaling servers | Per instance (3 ports each: streamer, player, SFU) |
 
 ---
 
 ## What Has Been Built (WORKING)
 
+### Backend
 1. **Full monorepo** with npm workspaces — builds and runs correctly
-2. **JWT authentication** — register, login, refresh tokens, logout
-3. **Project upload** — ZIP/RAR upload, extraction, executable detection (ELF magic bytes for Linux)
-4. **Database schema** — User, RefreshToken, Project, Instance models with Prisma migrations
-5. **Signaling server** — Epic Games Wilbur embedded, spawns per-project with dynamic ports
-6. **Port allocation** — Dynamic TCP port allocation from 8800-9100 range
-7. **Frontend UI** — Dashboard with project management, upload modal, stream viewer, public share links
-8. **PixelStreamPlayer component** — WebRTC viewer with retry logic, simulation fallback
-9. **Docker Compose** — Dev and production configurations with multi-stage Dockerfiles
-10. **Post-spawn health check** — Detects UE crashes within 5 seconds
-11. **Frontend error handling** — Instance status polling, crash detection with descriptive messages
-12. **Graceful signaling cleanup** — 5s grace period before killing signaling on UE crash
-13. **UE stdout logging** — Promoted from DEBUG to LOG level for visibility
-14. **Instance health endpoint** — `GET /projects/:id/health` for frontend polling
+2. **JWT authentication** — register, login, refresh token rotation, logout, `/auth/me`
+3. **HTTPOnly refresh tokens** — opaque random hex (40 bytes), stored in PostgreSQL, set as HTTPOnly secure cookie
+4. **Project upload** — ZIP/RAR upload (max 15GB), extraction, executable detection (ELF magic bytes on Linux, .exe on Windows)
+5. **Database schema** — User, RefreshToken, Project, Instance models with Prisma migrations (3 migrations)
+6. **Signaling server** — Epic Games Wilbur v2.3.1 embedded, spawns per-project with 3 dynamic ports (streamer, player, SFU)
+7. **Port allocation** — Dynamic TCP port allocation from 8800-9100 range via bind test
+8. **Post-spawn health check** — Detects UE crashes within 5 seconds (exit code check)
+9. **Graceful signaling cleanup** — 5s grace period before killing signaling on UE crash
+10. **Startup recovery** — `onModuleInit` probes all DB RUNNING instances; marks dead ones STOPPED
+11. **Metrics polling** — 3s interval polls Wilbur `/status` for player count (informational only)
+12. **Instance health endpoint** — `GET /projects/:id/health` for frontend crash detection polling
+13. **Cross-platform process management** — Windows `taskkill /F /T` vs Linux `/proc` tree walk (SIGKILL bottom-up)
+14. **Zone Identifier removal** — Windows Mark-of-the-Web stripping via PowerShell Unblock-File
+15. **Share slug auto-generation** — Random 8-char slug with uniqueness check
+16. **Swagger API docs** — Auto-generated at `/api/docs` with Bearer Auth support
+17. **Response envelope** — All responses wrapped in `{ success, data, timestamp }` by `TransformInterceptor`
+18. **Error envelope** — All errors wrapped in `{ success: false, error: { code, message, details }, timestamp }` by `HttpExceptionFilter`
+19. **Validation** — `class-validator` decorators on DTOs, global `ValidationPipe` with whitelist+transform+forbidNonWhitelisted
+20. **Common utilities** — `JwtAuthGuard`, `HttpExceptionFilter`, `TransformInterceptor`, `@GetUser()` decorator
+21. **Legacy signaling server** — `signaling-server.ts` (265 lines, unused in production, retained for reference)
+
+### Frontend
+22. **Dashboard UI** — Sidebar navigation (6 items), mobile hamburger menu, user dropdown
+23. **Project management** — List, upload modal (ZIP/RAR with progress bar), start/stop/delete
+24. **PixelStreamPlayer component** — WebRTC viewer with retry logic (10x), 45s timeout, library preloading
+25. **Canvas simulation fallback** — Animated 3D scene (particles, wireframe octahedron, HUD) when no UE executable
+26. **Public share links** — `/watch/[shareSlug]` auto-starts instance, no auth required
+27. **Axios auto-refresh** — Token refresh queue pattern: concurrent 401s share one refresh, then retry
+28. **Auth context** — React Context with login, register, logout, refreshUser, isAuthenticated
+29. **Next.js middleware** — Route guard: `/dashboard` requires `refresh_token` cookie
+30. **Live CCU analytics** — Instances page polls every 3s for real-time viewer counts
+31. **Stream viewer page** — Diagnostics panel, connection logs, health polling for crash detection
+32. **Custom CSS design system** — `glass-card`, `glass-panel`, `glow-btn`, `ps-fullscreen`
+33. **Tailwind custom theme** — Dark mode colors, glassmorphism tokens, accent colors
+
+### Placeholder Pages (mock data, no backend)
+34. **Deployments page** — Mock deployment data (Phase 2/3)
+35. **Storage page** — Mock file archive data (Phase 2/3)
+36. **Settings page** — Static form, no persistence (Phase 2/3)
+
+### Infrastructure
+37. **Docker Compose (dev)** — postgres_db, backend, frontend with volume mounts
+38. **Docker Compose (prod)** — Production targets, EC2-specific IPs, no exposed PostgreSQL port
+39. **Multi-stage Dockerfiles** — Both backend and frontend: development/builder/production stages
+40. **Production Dockerfile (backend)** — Installs Vulkan, Mesa, xvfb, xauth, fontconfig for headless UE
 
 ---
 
@@ -124,7 +197,7 @@ All previous fixes (build root, project name, xvfb-run, opengl, env vars, xauth)
 | 5 | Explicit Environment Variables | Child process env inheritance | Pass `VK_ICD_FILENAMES`, `GALLIUM_DRIVER`, etc. | ✅ Deployed |
 | 6 | xauth Package (Dockerfile) | `xvfb-run` requires `xauth` | Added to `apt-get install` in Dockerfile | ✅ Deployed & Rebuilt |
 
-### Current Spawn Command
+### Current Spawn Command (from `projects.service.ts:576-608`)
 ```
 xvfb-run -a /opt/streampixel/storage/projects/Linux-1784691498882/Linux/ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping \
   ArchVizExplorer \
@@ -146,6 +219,10 @@ xvfb-run -a /opt/streampixel/storage/projects/Linux-1784691498882/Linux/ArchVizE
   -opengl \
   -nosound
 ```
+
+Note: The `commonArgs` array (`projects.service.ts:576-591`) always includes the encoder flags above. The `platformArgs` array (`projects.service.ts:593-603`) appends platform-specific flags:
+- **Linux:** `-RenderOffscreen`, `-opengl`, `-nosound`
+- **Windows:** `-AudioMixer`, `-RenderOffscreen`, `-Windowed`
 
 ### Log Output (After xauth Fix — Current State)
 ```
@@ -255,15 +332,48 @@ The crash happens during **OpenGL rendering initialization** inside xvfb-run. Po
 
 ## KEY FILES
 
+### Backend
 | File | Purpose |
 |------|---------|
-| `apps/backend/src/projects/projects.service.ts` | Core UE spawn logic (build root, project name, xvfb-run, args) |
-| `apps/backend/src/projects/projects.controller.ts` | Health endpoint |
-| `apps/backend/Dockerfile` | Production image (packages, env vars, xvfb, xauth) |
-| `infrastructure/docker/docker-compose.prod.yml` | Backend service config (ports, volumes, env) |
-| `apps/frontend/src/components/PixelStreamPlayer.tsx` | WebRTC viewer with retry logic |
-| `apps/frontend/src/app/dashboard/projects/[id]/stream/page.tsx` | Stream page with health polling |
-| `apps/frontend/src/app/watch/[shareSlug]/page.tsx` | Public viewer page |
+| `apps/backend/src/main.ts` | Bootstrap: Swagger, CORS, validation, global prefix `/api/v1` |
+| `apps/backend/src/app.module.ts` | Root module (ConfigModule, Prisma, Users, Auth, Projects) |
+| `apps/backend/src/projects/projects.service.ts` | **Core:** upload, extract, spawn UE + Wilbur (~1400 lines) |
+| `apps/backend/src/projects/projects.controller.ts` | 7 JWT-guarded endpoints (upload, list, get, delete, start, stop, health, share-slug) |
+| `apps/backend/src/projects/projects-public.controller.ts` | 1 public endpoint (get/auto-start by share slug) |
+| `apps/backend/src/auth/auth.service.ts` | JWT auth: bcrypt, access tokens, refresh token rotation |
+| `apps/backend/src/auth/auth.controller.ts` | 5 endpoints: register, login, logout, refresh, me |
+| `apps/backend/src/auth/strategies/jwt.strategy.ts` | Passport JWT strategy (Bearer token extraction) |
+| `apps/backend/src/common/guards/jwt-auth.guard.ts` | Passport JWT guard |
+| `apps/backend/src/common/filters/http-exception.filter.ts` | Global error envelope |
+| `apps/backend/src/common/interceptors/transform.interceptor.ts` | Global success envelope |
+| `apps/backend/src/common/decorators/get-user.decorator.ts` | `@GetUser()` parameter decorator |
+| `apps/backend/src/prisma/prisma.service.ts` | PrismaClient wrapper with lifecycle hooks |
+| `apps/backend/prisma/schema.prisma` | DB schema: User, RefreshToken, Project, Instance |
+| `apps/backend/Dockerfile` | Multi-stage: dev/builder/production (Vulkan, Mesa, xvfb, xauth) |
+| `apps/backend/src/projects/signaling-server.ts` | Legacy custom WebSocket signaling (unused, retained for reference) |
+| `apps/backend/src/projects/signaling/src/index.ts` | Embedded Epic Games Wilbur v2.3.1 entry point |
+
+### Frontend
+| File | Purpose |
+|------|---------|
+| `apps/frontend/src/services/api.ts` | Axios client: auto token refresh with queue pattern |
+| `apps/frontend/src/hooks/useAuth.tsx` | React Context: login, register, logout, refreshUser |
+| `apps/frontend/src/middleware.ts` | Route guard: `/dashboard` requires `refresh_token` cookie |
+| `apps/frontend/src/components/PixelStreamPlayer.tsx` | WebRTC viewer + canvas simulation fallback (~494 lines) |
+| `apps/frontend/src/app/dashboard/projects/page.tsx` | Project list, upload modal, start/stop/delete |
+| `apps/frontend/src/app/dashboard/projects/[id]/stream/page.tsx` | Stream viewer + diagnostics panel + health polling |
+| `apps/frontend/src/app/watch/[shareSlug]/page.tsx` | Public stream viewer (no auth, auto-starts instance) |
+| `apps/frontend/src/app/dashboard/instances/page.tsx` | Live CCU analytics (polls every 3s) |
+| `apps/frontend/src/app/globals.css` | Custom CSS: glass-card, glass-panel, glow-btn, ps-fullscreen |
+| `apps/frontend/tailwind.config.ts` | Dark theme tokens, glassmorphism, accent colors |
+| `apps/frontend/Dockerfile` | Multi-stage: dev/builder/production |
+
+### Infrastructure
+| File | Purpose |
+|------|---------|
+| `infrastructure/docker/docker-compose.yml` | Dev: postgres_db (5434:5432), backend, frontend |
+| `infrastructure/docker/docker-compose.prod.yml` | Production: production targets, EC2 IP hardcoded |
+| `packages/shared/src/index.ts` | Shared types: UserRole, ApiResponse, UserDto, AuthResponseDto |
 
 ### EC2 Paths
 - Binary: `/opt/streampixel/storage/projects/Linux-1784691498882/Linux/ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping`
@@ -274,53 +384,64 @@ The crash happens during **OpenGL rendering initialization** inside xvfb-run. Po
 
 ## DATABASE SCHEMA (Prisma)
 
+Source: `apps/backend/prisma/schema.prisma`
+
 ```prisma
 model User {
-  id           String         @id @default(uuid())
-  email        String         @unique
-  name         String?
-  password     String
-  role         Role           @default(USER)
-  createdAt    DateTime       @default(now())
-  updatedAt    DateTime       @updatedAt
-  projects     Project[]
+  id            String         @id @default(uuid())
+  email         String         @unique
+  name          String?
+  password      String
+  role          Role           @default(USER)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
   refreshTokens RefreshToken[]
+  projects      Project[]
+
+  @@map("users")
 }
 
 model RefreshToken {
   id        String   @id @default(uuid())
   token     String   @unique
   userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
   isRevoked Boolean  @default(false)
   createdAt DateTime @default(now())
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("refresh_tokens")
 }
 
 model Project {
-  id             String     @id
+  id             String     @id @default(uuid())
   name           String
   version        String
-  status         String     @default("STOPPED")
-  zipPath        String
-  extractedPath  String
+  status         String     @default("STOPPED") // "RUNNING", "STOPPED"
+  zipPath        String?
+  extractedPath  String?
   executablePath String?
-  shareSlug      String     @unique
-  maxCCU         Int        @default(3)
   userId         String
-  createdAt      DateTime   @default(now())
-  updatedAt      DateTime   @updatedAt
   user           User       @relation(fields: [userId], references: [id], onDelete: Cascade)
   instances      Instance[]
+  createdAt      DateTime   @default(now())
+  updatedAt      DateTime   @updatedAt
+  shareSlug      String?    @unique
+  maxCCU         Int        @default(3)
+
+  @@map("projects")
 }
 
 model Instance {
-  id        String   @id @default(uuid())
-  projectId String
-  port      Int
-  status    String   @default("STARTING")
-  pid       Int?
-  createdAt DateTime @default(now())
-  project   Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  id         String   @id @default(uuid())
+  projectId  String
+  project    Project  @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  port       Int
+  status     String   @default("STARTING") // "STARTING", "RUNNING", "STOPPED", "ERROR"
+  pid        Int?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@map("instances")
 }
 ```

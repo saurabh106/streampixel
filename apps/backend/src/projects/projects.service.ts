@@ -24,11 +24,14 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     {
       signalingProcess?: any;
       ueProcess?: any;
+      xvfbProcess?: any;
       playerPort: number;
       streamerPort: number;
       clients: number;
       ownerId: string;
       lastError?: string;
+      autoRestart: boolean;
+      restartTimer?: any;
     }
   >();
   // Storage root: configurable via STORAGE_PATH env var.
@@ -88,6 +91,14 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   async onModuleDestroy() {
     this.logger.log('Shutting down. Cleaning up all active processes...');
     for (const [projectId, proc] of this.activeProcesses.entries()) {
+      // Cancel any pending auto-restart timers
+      if (proc.restartTimer) {
+        clearTimeout(proc.restartTimer);
+      }
+      if (proc.xvfbProcess && proc.xvfbProcess.pid) {
+        this.logger.log(`Killing Xvfb process PID ${proc.xvfbProcess.pid}`);
+        this.killProcessTree(proc.xvfbProcess.pid);
+      }
       if (proc.ueProcess && proc.ueProcess.pid) {
         this.logger.log(`Killing UE process PID ${proc.ueProcess.pid}`);
         this.killProcessTree(proc.ueProcess.pid);
@@ -504,9 +515,6 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Signaling server HTTP handler confirmed ready on port ${playerPort}`);
     }
 
-    let ueProcess: any;
-    let pid: number;
-
     if (!project.executablePath || !project.extractedPath) {
       // No executable was detected during upload — this is a hard error, not a simulation fallback
       this.logger.error(
@@ -554,30 +562,34 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       );
     }
     const ueCwd = buildRoot || path.dirname(absoluteExePath);
-    this.logger.log(`Spawning Unreal Engine executable: ${absoluteExePath}`);
     this.logger.log(`UE build root (CWD): ${ueCwd}`);
 
-    // Parse the .sh launcher script to extract the project name.
-    // UE Linux builds ship with a launcher (e.g., ArchVizExplorer.sh) that passes the
-    // project name as the first argument to the binary. Without it, the binary doesn't
-    // know which uproject to load and exits immediately.
-    const projectName = this.parseLauncherScript(ueCwd);
-    this.logger.log(`Parsed project name from launcher: ${projectName || '(none)'}`);
+    // Create Saved/Logs/ and Config/ directories — UE needs these to initialize properly.
+    this.prepareUEDirectories(ueCwd);
 
-    // PixelStreaming2 launch flags (UE 5.4+)
-    // -PixelStreamingSignallingURL is the single-flag connection string for PixelStreaming2
-    // Falls back to -PixelStreamingIP/-PixelStreamingPort for older plugin versions
-    //
-    // Platform-specific notes:
-    // - Linux headless: uses OpenGL software renderer (-opengl) via Mesa/llvmpipe,
-    //   no window system (-RenderOffscreen), no audio device (-nosound).
-    //   -vulkan requires a real GPU or Vulkan-capable driver; -opengl works with Mesa.
-    // - Windows: uses D3D12 by default, -Windowed for offscreen rendering.
-    const commonArgs = [
-      '-unattended',
-      `-PixelStreamingSignallingURL=ws://127.0.0.1:${streamerPort}`,
-      `-PixelStreamingIP=127.0.0.1`,
-      `-PixelStreamingPort=${streamerPort}`,
+    // Find the .sh launcher script. Running the .sh is preferred over the raw binary
+    // because it respects the build's own environment setup and is compatible with
+    // custom UE builds that may have additional launch logic.
+    const launcherScript = this.findLauncherScript(ueCwd);
+
+    // Ensure the launcher script is executable.
+    // On Linux: extracted archives strip Unix permission bits — chmod +x is required.
+    // On Windows: .bat files don't need special permissions.
+    if (launcherScript && this.isLinux) {
+      try {
+        fs.chmodSync(launcherScript, 0o755);
+        this.logger.log(`Ensured execute permission on launcher script: ${launcherScript}`);
+      } catch {
+        // Non-fatal — the spawn will fail with a clear error if the script isn't executable
+      }
+    }
+
+    // Build the PixelStreaming connection flags — version-aware (UE 5.5+ vs earlier)
+    const version = this.readBuildVersion(ueCwd);
+    const pixelStreamingArgs = this.getPixelStreamingArgs(streamerPort, version);
+
+    // Encoder tuning flags
+    const encoderArgs = [
       '-PixelStreamingEncoderCodec=H264',
       '-PixelStreamingWebRTCFps=60',
       '-PixelStreamingEncoderMinQP=1',
@@ -585,33 +597,44 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       '-PixelStreamingEncoderTargetBitrate=20000',
       '-PixelStreamingEncoderMaxBitrate=50000',
       '-PixelStreamingEncoderRateControl=CBR',
-      '-ForceRes',
-      '-ResX=1920',
-      '-ResY=1080',
     ];
 
-    const platformArgs = this.isLinux
-      ? [
-          '-RenderOffscreen', // No display server required — renders to offscreen buffer
-          '-opengl', // Software rendering via Mesa/llvmpipe — works without a real GPU
-          '-nosound', // Headless servers lack PulseAudio/ALSA; avoids device init failures
-        ]
-      : [
-          '-AudioMixer', // Windows: required for the audio subsystem to initialize properly
-          '-RenderOffscreen',
-          '-Windowed', // Windows: create a hidden window for the D3D12 rendering context
-        ];
+    // Resolution flags
+    const resolutionArgs = ['-ForceRes', '-ResX=1920', '-ResY=1080'];
 
-    // UE expects the project name as the first argument before any flags.
-    // The .sh launcher does: binary <ProjectName> "$@"
-    const positionalArgs = projectName ? [projectName] : [];
-    const args = [...positionalArgs, ...commonArgs, ...platformArgs];
-    this.logger.log(`UE launch args (${process.platform}): ${args.join(' ')}`);
+    // Audio/platform flags — -RenderOffscreen is mandatory for headless server rendering
+    const platformArgs = this.isLinux
+      ? ['-RenderOffscreen', '-nosound']
+      : ['-RenderOffscreen', '-AudioMixer', '-Windowed'];
+
+    const ueArgs = [
+      '-unattended',
+      ...pixelStreamingArgs,
+      ...encoderArgs,
+      ...resolutionArgs,
+      ...platformArgs,
+    ];
+
+    // Build the environment variables for the UE process (Vulkan/Mesa on Linux)
+    // On Linux, start Xvfb first to provide a virtual display for rendering.
+    let xvfbResult: { display: string; process: any } | null = null;
+    if (this.isLinux) {
+      xvfbResult = this.startXvfb();
+      // Give Xvfb a moment to bind
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    const display = xvfbResult?.display;
+    const ueEnv = this.getUEEnvironment(display);
+
+    this.logger.log(`UE launch args: ${ueArgs.join(' ')}`);
+    this.logger.log(`Launcher script: ${launcherScript || '(none — will spawn binary directly)'}`);
+    this.logger.log(`UE env vars: ${Object.keys(ueEnv).join(', ') || '(inherited)'}`);
 
     // On Linux, if the backend process is running as root (UID 0), drop root privileges to UID/GID 1000
     // because Unreal Engine binaries explicitly refuse to run with root privileges and exit with SIGABRT.
     const spawnOptions: any = {
       cwd: ueCwd,
+      env: { ...process.env, ...ueEnv },
     };
     if (this.isLinux && process.getuid && process.getuid() === 0) {
       this.logger.warn(
@@ -621,38 +644,33 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       spawnOptions.gid = 1000;
     }
 
-    // Pass all required env vars explicitly so the child process inherits them
-    // even when spawned via xvfb-run or another wrapper.
-    if (this.isLinux) {
-      spawnOptions.env = {
-        ...process.env,
-        VK_ICD_FILENAMES: process.env.VK_ICD_FILENAMES || '/usr/share/vulkan/icd.d/lvp_icd.x86_64.json',
-        XDG_RUNTIME_DIR: process.env.XDG_RUNTIME_DIR || '/tmp/runtime-root',
-        GALLIUM_DRIVER: process.env.GALLIUM_DRIVER || 'llvmpipe',
-        MESA_GL_VERSION_OVERRIDE: process.env.MESA_GL_VERSION_OVERRIDE || '4.5',
-        MESA_GL_VERSION_OVERRIDE_4: process.env.MESA_GL_VERSION_OVERRIDE_4 || '4.5',
-        DISPLAY: ':99', // xvfb-run will create this virtual display
-      };
-    }
-
-    const isWindowsExeOnLinux = this.isLinux && absoluteExePath.toLowerCase().endsWith('.exe');
+    let ueProcess: any;
+    let pid: number;
 
     try {
-      if (isWindowsExeOnLinux) {
-        this.logger.log(
-          `Windows .exe build detected on Linux host. Spawning via Wine: ${absoluteExePath}`,
-        );
-        const wineBin = fs.existsSync('/usr/bin/wine64') ? 'wine64' : 'wine';
-        ueProcess = spawn(wineBin, [absoluteExePath, ...args], spawnOptions);
-      } else if (this.isLinux) {
-        // Wrap with xvfb-run to provide a virtual X display for the OpenGL context.
-        // -a auto-selects a free display number to avoid conflicts.
-        this.logger.log(
-          `Linux host: wrapping UE spawn with xvfb-run for virtual display`,
-        );
-        ueProcess = spawn('xvfb-run', ['-a', absoluteExePath, ...args], spawnOptions);
+      if (launcherScript) {
+        // Primary path: run the platform launcher script with our appended flags.
+        // Linux: .sh script invokes the ELF binary with the correct project name.
+        // Windows: .bat script invokes the .exe with the correct project name.
+        // The launcher handles project name resolution and engine-specific setup.
+        // We append PixelStreaming, encoder, resolution, and platform flags.
+        this.logger.log(`Spawning UE via launcher script: ${launcherScript} (CWD: ${ueCwd})`);
+        ueProcess = spawn(launcherScript, ueArgs, spawnOptions);
       } else {
-        ueProcess = spawn(absoluteExePath, args, spawnOptions);
+        // Fallback: no launcher script found — spawn the binary directly with project name prefix.
+        // On Linux, the binary requires the project name as the first argument.
+        // On Windows, same pattern — .exe expects ProjectName before flags.
+        const projectName = this.parseLauncherScript(ueCwd);
+        const positionalArgs = projectName ? [projectName] : [];
+        this.logger.log(`No launcher script found. Spawning binary directly: ${absoluteExePath}`);
+
+        const isWindowsExeOnLinux = this.isLinux && absoluteExePath.toLowerCase().endsWith('.exe');
+        if (isWindowsExeOnLinux) {
+          const wineBin = fs.existsSync('/usr/bin/wine64') ? 'wine64' : 'wine';
+          ueProcess = spawn(wineBin, [absoluteExePath, ...positionalArgs, ...ueArgs], spawnOptions);
+        } else {
+          ueProcess = spawn(absoluteExePath, [...positionalArgs, ...ueArgs], spawnOptions);
+        }
       }
 
       ueProcess.stdout?.on('data', (data: Buffer) => {
@@ -680,7 +698,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         if (proc) {
           proc.lastError =
             code !== null && code !== 0
-              ? `Unreal Engine process crashed (exit code ${code}). Ensure the build is a valid Linux binary with Vulkan rendering support.`
+              ? `Unreal Engine process crashed (exit code ${code}). Ensure the build is a valid Linux binary with Vulkan/OpenGL rendering support.`
               : `Unreal Engine process exited unexpectedly (signal=${signal}).`;
         }
 
@@ -699,14 +717,34 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
 
         // Keep the signaling server alive briefly so connected clients can detect
         // the disconnection gracefully rather than hitting an abrupt 1006 close.
-        // Clean it up after a short grace period.
+        // Clean up signaling and xvfb after a short grace period.
         if (signalingProcess && signalingProcess.pid) {
           setTimeout(() => {
             this.logger.log(
               `Grace period over. Killing signaling process PID ${signalingProcess.pid} for project ${project.id}`,
             );
             this.killProcessTree(signalingProcess.pid);
+            // Also kill the Xvfb process for this instance
+            const p = this.activeProcesses.get(project.id);
+            if (p?.xvfbProcess?.pid) {
+              this.killProcessTree(p.xvfbProcess.pid);
+            }
           }, 5000);
+        }
+
+        // Auto-restart: if this project has a public share slug (viewers depend on it),
+        // automatically restart the UE instance after a brief cooldown.
+        // Cancel any existing restart timer first.
+        if (proc?.restartTimer) {
+          clearTimeout(proc.restartTimer);
+        }
+        if (project.shareSlug) {
+          this.logger.log(
+            `Project ${project.id} has a public share link — scheduling auto-restart in 10s`,
+          );
+          this.autoRestartUE(project.id, userId);
+        } else {
+          this.logger.log(`Project ${project.id} has no public share link — not auto-restarting`);
         }
       });
 
@@ -729,7 +767,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         const errorMsg =
           proc?.lastError ||
           `Unreal Engine process exited immediately after launch (exit code ${exitCode}). ` +
-            `Ensure the packaged build is a valid Linux binary with OpenGL rendering support. ` +
+            `Ensure the packaged build is a valid Linux binary with OpenGL or Vulkan rendering support. ` +
             `Check backend logs for [UE-PID ${pid}] output.`;
         this.logger.error(`UE process health check failed: ${errorMsg}`);
 
@@ -766,20 +804,23 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       }
       throw new BadRequestException(
         `Failed to launch Unreal Engine executable: ${err.message}. ` +
-          `Ensure the binary is a valid ${this.isLinux ? 'Linux ELF' : 'Windows'} executable and not corrupted.`,
+          `Ensure the binary is a valid ${this.isLinux ? 'Linux ELF' : 'Windows'} executable with rendering support (Vulkan or OpenGL) and not corrupted.`,
       );
     }
 
     // Save processes in memory map
     // Instance lifecycle is decoupled from any browser/WebSocket connection:
     // closing a tab, refreshing the page, or zero viewers will NOT stop this instance.
+    // Auto-restart is enabled for projects with a public share slug.
     this.activeProcesses.set(projectId, {
       signalingProcess,
       ueProcess,
+      xvfbProcess: xvfbResult?.process,
       playerPort,
       streamerPort,
       clients: 0,
       ownerId: userId,
+      autoRestart: !!project.shareSlug,
     });
 
     // Create instance record in DB
@@ -873,6 +914,19 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     const proc = this.activeProcesses.get(projectId);
     if (proc) {
       this.logger.log(`Stopping instance for project ${project.name}...`);
+      // Cancel any pending auto-restart timer
+      if (proc.restartTimer) {
+        clearTimeout(proc.restartTimer);
+        this.logger.log(`Cancelled pending auto-restart for project ${project.id}`);
+      }
+      if (proc.xvfbProcess && proc.xvfbProcess.pid) {
+        this.logger.log(`Killing Xvfb process PID ${proc.xvfbProcess.pid}`);
+        try {
+          this.killProcessTree(proc.xvfbProcess.pid);
+        } catch (e) {
+          this.logger.warn(`Could not kill Xvfb process ${proc.xvfbProcess.pid}: ${e.message}`);
+        }
+      }
       if (proc.ueProcess && proc.ueProcess.pid) {
         this.logger.log(`Killing Unreal process PID ${proc.ueProcess.pid}`);
         try {
@@ -908,6 +962,62 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       message: 'Instance stopped successfully',
       status: 'STOPPED',
     };
+  }
+
+  // Auto-restart a UE instance after a crash.
+  // This is used for public share links that need 24/7 uptime. When the UE process exits
+  // (crashes, OOM, rendering failure), this method waits a brief cooldown period, then
+  // attempts to re-spawn the instance. It preserves the existing signaling server port
+  // allocation so the public URL remains valid.
+  private autoRestartUE(projectId: string, userId: string): void {
+    const COOLDOWN_MS = 10000;
+
+    const timer = setTimeout(async () => {
+      const proc = this.activeProcesses.get(projectId);
+      if (!proc || proc.ueProcess?.exitCode === null) {
+        return; // Already restarted or still alive
+      }
+
+      try {
+        this.logger.log(`Auto-restarting UE instance for project ${projectId}...`);
+
+        // Check the project still exists and has a share slug (public instance)
+        const project = await this.prisma.project.findFirst({
+          where: { id: projectId },
+        });
+        if (!project || !project.shareSlug) {
+          this.logger.log(
+            `Project ${projectId} no longer has a share slug — skipping auto-restart`,
+          );
+          return;
+        }
+
+        // Clean up old signaling server and xvfb
+        if (proc.signalingProcess?.pid) {
+          this.killProcessTree(proc.signalingProcess.pid);
+        }
+        if (proc.xvfbProcess?.pid) {
+          this.killProcessTree(proc.xvfbProcess.pid);
+        }
+        this.activeProcesses.delete(projectId);
+
+        // Re-spawn using startInstance (which re-allocates ports and spawns fresh processes)
+        await this.startInstance(projectId, userId);
+        this.logger.log(`Auto-restart succeeded for project ${projectId}`);
+      } catch (err: any) {
+        this.logger.error(
+          `Auto-restart failed for project ${projectId}: ${err.message}. ` +
+            `The stream will not resume until manually restarted.`,
+        );
+        this.activeProcesses.delete(projectId);
+      }
+    }, COOLDOWN_MS);
+
+    // Store the timer so it can be cancelled if the instance is manually stopped
+    const proc = this.activeProcesses.get(projectId);
+    if (proc) {
+      proc.restartTimer = timer;
+    }
   }
 
   // Helper: Find first free TCP port in a range
@@ -1024,6 +1134,49 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         }
       }
     }, 3000);
+  }
+
+  // Read Engine/Build/Build.version from a packaged UE build.
+  // Returns { major, minor } or null if the file is missing/unreadable.
+  private readBuildVersion(buildRoot: string): { major: number; minor: number } | null {
+    const versionPath = path.join(buildRoot, 'Engine', 'Build', 'Build.version');
+    try {
+      if (fs.existsSync(versionPath)) {
+        const version = JSON.parse(fs.readFileSync(versionPath, 'utf-8'));
+        const major = version.MajorVersion ?? 0;
+        const minor = version.MinorVersion ?? 0;
+        this.logger.log(
+          `Engine version: UE ${major}.${minor} ` +
+            `(MajorVersion=${major}, MinorVersion=${minor})`,
+        );
+        return { major, minor };
+      }
+    } catch (err: any) {
+      this.logger.warn(`Failed to read Build.version at ${versionPath}: ${err.message}`);
+    }
+    return null;
+  }
+
+  // Return the correct PixelStreaming connection flags for the given engine version.
+  //
+  // Flag naming changed between UE versions:
+  //   - UE 5.4 and earlier: -PixelStreamingIP + -PixelStreamingPort (two separate flags)
+  //   - UE 5.5+:            -PixelStreamingSignallingURL (single connection string)
+  //
+  // This is the single place to update when Epic changes flag names in a future version.
+  private getPixelStreamingArgs(streamerPort: number, version: { major: number; minor: number } | null): string[] {
+    if (version && (version.major > 5 || (version.major === 5 && version.minor >= 5))) {
+      // UE 5.5+ — single-flag connection string
+      return [`-PixelStreamingSignallingURL=ws://127.0.0.1:${streamerPort}`];
+    }
+
+    // UE 5.4 and earlier — two separate flags
+    // Also the safe fallback for missing/unknown versions, since the older
+    // flags are more widely recognized across all UE5 releases.
+    return [
+      `-PixelStreamingIP=127.0.0.1`,
+      `-PixelStreamingPort=${streamerPort}`,
+    ];
   }
 
   // Binary exclusion list — filenames/substrings that are NEVER the project executable.
@@ -1164,17 +1317,40 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
-  // Parse the .sh launcher script in the build root to extract the project name.
-  // Typical content: "$SCRIPT_DIR/ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping" ArchVizExplorer "$@"
-  // The project name is the argument right after the binary path.
-  private parseLauncherScript(buildRoot: string): string | null {
+  // Find the launcher script in the build root.
+  // On Linux: UE builds ship with a .sh launcher (e.g., ArchVizExplorer.sh).
+  // On Windows: UE builds ship with a .bat launcher (e.g., ArchVizExplorer.bat).
+  // Running the launcher directly is preferred over calling the raw binary because
+  // it handles project name resolution and may contain additional setup logic.
+  // Returns the full path to the launcher script, or null if not found.
+  private findLauncherScript(buildRoot: string): string | null {
+    const ext = this.isLinux ? '.sh' : '.bat';
     try {
       const entries = fs.readdirSync(buildRoot, { withFileTypes: true });
       for (const entry of entries) {
-        if (entry.isFile() && entry.name.endsWith('.sh')) {
+        if (entry.isFile() && entry.name.endsWith(ext)) {
+          const fullPath = path.join(buildRoot, entry.name);
+          this.logger.log(`Found ${ext} launcher script: ${entry.name}`);
+          return fullPath;
+        }
+      }
+    } catch (err: any) {
+      this.logger.warn(`Failed to scan for launcher scripts in ${buildRoot}: ${err.message}`);
+    }
+    return null;
+  }
+
+  // Parse the launcher script to extract the project name (used as fallback for binary spawn).
+  // Linux (.sh):  "$SCRIPT_DIR/ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping" ArchVizExplorer "$@"
+  // Windows (.bat): "%~dp0ArchVizExplorer\Binaries\Win64\ArchVizExplorer.exe" ArchVizExplorer %*
+  // The project name is the argument right after the binary path in both formats.
+  private parseLauncherScript(buildRoot: string): string | null {
+    const ext = this.isLinux ? '.sh' : '.bat';
+    try {
+      const entries = fs.readdirSync(buildRoot, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isFile() && entry.name.endsWith(ext)) {
           const content = fs.readFileSync(path.join(buildRoot, entry.name), 'utf-8');
-          // Match the pattern: <binary_path> <project_name> "$@"
-          // The binary path may be quoted or use $SCRIPT_DIR
           const match = content.match(
             /["']?[^"']*Binaries[^"']*["']?\s+([A-Za-z_][A-Za-z0-9_]*)\s/,
           );
@@ -1190,6 +1366,88 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Failed to parse launcher scripts in ${buildRoot}: ${err.message}`);
     }
     return null;
+  }
+
+  // Create Required/Logs and Config directories inside the build root.
+  // UE packaged builds need these directories to initialize properly — without them,
+  // the engine may fail to create log files or read config during startup.
+  private prepareUEDirectories(buildRoot: string): void {
+    const dirs = [
+      path.join(buildRoot, 'Saved', 'Logs'),
+      path.join(buildRoot, 'Config'),
+      path.join(buildRoot, 'Saved'),
+    ];
+    for (const dir of dirs) {
+      try {
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+          this.logger.log(`Created UE directory: ${dir}`);
+        }
+      } catch (err: any) {
+        this.logger.warn(`Failed to create directory ${dir}: ${err.message}`);
+      }
+    }
+  }
+
+  // Build the environment variables for the UE child process.
+  // On Linux, Mesa/Vulkan software rendering requires specific env vars to function
+  // on headless servers without a real GPU. These tell Mesa to use the lavapipe/llvmpipe
+  // software rasterizer and where to find the Vulkan ICD (Installable Client Driver).
+  private getUEEnvironment(display?: string): Record<string, string> {
+    if (!this.isLinux) return {};
+
+    const env: Record<string, string> = {
+      VK_ICD_FILENAMES: '/usr/share/vulkan/icd.d/lvp_icd.x86_64.json',
+      GALLIUM_DRIVER: 'llvmpipe',
+      MESA_GL_VERSION_OVERRIDE: '4.5',
+      XDG_RUNTIME_DIR: '/tmp/runtime-root',
+      // Pass through system PATH and HOME so the child process can find system binaries
+      PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
+      HOME: process.env.HOME || '/tmp',
+    };
+
+    // Set DISPLAY if xvfb is running — UE needs a display server to initialize rendering
+    if (display) {
+      env.DISPLAY = display;
+    }
+
+    return env;
+  }
+
+  // Start Xvfb (X Virtual Framebuffer) on Linux for headless rendering.
+  // UE packaged builds require a display server to initialize the rendering pipeline,
+  // even when using -RenderOffscreen. On a GPU-less server, Xvfb provides a virtual
+  // display backed by Mesa/llvmpipe software rendering.
+  // Returns the display string (e.g., ":99") or null if xvfb failed to start.
+  private startXvfb(): { display: string; process: any } | null {
+    if (!this.isLinux) return null;
+
+    // Find an available display number (try :99, :98, :97, ...)
+    const displayNum = 99;
+    const display = `:${displayNum}`;
+
+    try {
+      // Start Xvfb with a 1920x1080x24-bit color screen
+      const xvfbProcess = spawn('Xvfb', [display, '-screen', '0', '1920x1080x24', '-ac'], {
+        stdio: 'ignore',
+        detached: true,
+      });
+
+      xvfbProcess.on('error', (err: Error) => {
+        this.logger.error(`Xvfb process error: ${err.message}`);
+      });
+
+      xvfbProcess.on('exit', (code: number | null) => {
+        this.logger.warn(`Xvfb process exited with code ${code}`);
+      });
+
+      // Give Xvfb a moment to bind to the display
+      this.logger.log(`Xvfb started with PID ${xvfbProcess.pid} on display ${display}`);
+      return { display, process: xvfbProcess };
+    } catch (err: any) {
+      this.logger.error(`Failed to start Xvfb: ${err.message}`);
+      return null;
+    }
   }
 
   // Helper: Find the project executable. On Linux, detects by X_OK permission bit.
@@ -1287,6 +1545,17 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       // Remove from in-memory process map if present
       const proc = this.activeProcesses.get(projectId);
       if (proc) {
+        // Cancel any pending auto-restart timer
+        if (proc.restartTimer) {
+          clearTimeout(proc.restartTimer);
+        }
+        if (proc.xvfbProcess && proc.xvfbProcess.pid) {
+          try {
+            this.killProcessTree(proc.xvfbProcess.pid);
+          } catch {
+            /* ignore */
+          }
+        }
         if (proc.ueProcess && proc.ueProcess.pid) {
           try {
             this.killProcessTree(proc.ueProcess.pid);
