@@ -32,7 +32,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   const refreshUser = async () => {
     try {
+      console.log('[Auth] Refreshing user from /auth/me...');
       const res: any = await api.get('/auth/me');
+      console.log('[Auth] User refreshed:', res?.email);
       setUser(res);
     } catch (e) {
       setUser(null);
@@ -41,10 +43,13 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   const checkAuth = async () => {
     try {
+      console.log('[Auth] Checking session via /auth/refresh...');
       const res: any = await api.post('/auth/refresh');
+      console.log('[Auth] Session valid, user:', res.user?.email);
       setAccessToken(res.accessToken);
       setUser(res.user);
     } catch (e) {
+      console.warn('[Auth] No active session, user not logged in');
       setAccessToken(null);
       setUser(null);
     } finally {
@@ -59,7 +64,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const login = async (email: string, password: string) => {
     setLoading(true);
     try {
+      console.log('[Auth] Logging in:', email);
       const res: any = await api.post('/auth/login', { email, password });
+      console.log('[Auth] Login successful, user:', res.user?.email);
       setAccessToken(res.accessToken);
       setUser(res.user);
       router.push('/dashboard');
@@ -75,7 +82,9 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
   const register = async (email: string, password: string, name?: string) => {
     setLoading(true);
     try {
+      console.log('[Auth] Registering:', email);
       await api.post('/auth/register', { email, password, name });
+      console.log('[Auth] Registration successful');
     } finally {
       setLoading(false);
     }

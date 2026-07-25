@@ -98,6 +98,7 @@ export default function PixelStreamPlayer({
     if (isSimulated) {
       setLoading(false);
       setConnected(true);
+      console.log('[PixelStream] Starting in SIMULATION mode');
       onLog?.('Establishing WebSocket connection... (Simulation Mode)');
       const t1 = setTimeout(() => onLog?.('WebSocket connection opened (Simulated)'), 500);
       const t2 = setTimeout(
@@ -124,6 +125,7 @@ export default function PixelStreamPlayer({
 
     const host = window.location.hostname || '127.0.0.1';
     const wsUrl = `ws://${host}:${port}`;
+    console.log('[PixelStream] Connecting to signaling server:', wsUrl);
     onLog?.(`Establishing WebSocket to ${wsUrl}`);
 
     let active = true;
@@ -148,6 +150,7 @@ export default function PixelStreamPlayer({
         .then(({ Config, PixelStreaming }) => {
           if (!active) return;
 
+          console.log('[PixelStream] PixelStreaming library loaded, creating config...');
           try {
             const config = new Config({
               initialSettings: {
@@ -173,14 +176,17 @@ export default function PixelStreamPlayer({
             streamRef.current = stream;
 
             stream.addEventListener('webRtcConnecting', () => {
+              console.log('[PixelStream] WebRTC connecting...');
               onLog?.('WebRTC connection negotiating...');
             });
 
             stream.addEventListener('webRtcConnected', () => {
+              console.log('[PixelStream] WebRTC connected');
               onLog?.('WebRTC peer connection established');
             });
 
             stream.addEventListener('videoInitialized', () => {
+              console.log('[PixelStream] Video initialized — stream is live!');
               if (connectionTimer) clearTimeout(connectionTimer);
               setLoading(false);
               setConnected(true);
@@ -190,6 +196,7 @@ export default function PixelStreamPlayer({
             });
 
             stream.addEventListener('webRtcDisconnected', () => {
+              console.log('[PixelStream] WebRTC disconnected');
               onLog?.('Pixel Streaming connection closed');
               if (connected) {
                 setConnected(false);
@@ -216,6 +223,7 @@ export default function PixelStreamPlayer({
             });
 
             stream.addEventListener('webRtcFailed', () => {
+              console.error('[PixelStream] WebRTC handshake failed');
               if (connectionTimer) clearTimeout(connectionTimer);
               setConnected(false);
               setLoading(false);
@@ -239,7 +247,7 @@ export default function PixelStreamPlayer({
               }
             });
           } catch (err: any) {
-            console.error(err);
+            console.error('[PixelStream] Config/stream creation error:', err);
             if (connectionTimer) clearTimeout(connectionTimer);
             if (retryCount < MAX_RETRIES) {
               retryCount++;
@@ -255,8 +263,8 @@ export default function PixelStreamPlayer({
           }
         })
         .catch((importErr: any) => {
+          console.error('[PixelStream] Failed to load PixelStreaming library:', importErr);
           if (connectionTimer) clearTimeout(connectionTimer);
-          console.error('Failed to load PixelStreaming library:', importErr);
           if (retryCount < MAX_RETRIES) {
             retryCount++;
             onLog?.(

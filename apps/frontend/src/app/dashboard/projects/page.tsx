@@ -44,7 +44,9 @@ export default function ProjectsPage() {
     try {
       setLoading(true);
       setError(null);
+      console.log('[Projects] Fetching project list...');
       const data: any = await api.get('/projects');
+      console.log('[Projects] Fetched projects:', data?.length, 'projects');
       setProjects(data);
     } catch (err: any) {
       setError(err.message || 'Failed to fetch projects list');
@@ -105,6 +107,7 @@ export default function ProjectsPage() {
       formData.append('name', projName);
       formData.append('version', projVersion);
 
+      console.log('[Projects] Uploading project:', projName, 'File:', projFile.name, 'Size:', (projFile.size / 1024 / 1024).toFixed(1) + 'MB');
       await api.post('/projects/upload', formData, {
         headers: {
           'Content-Type': 'multipart/form-data',
@@ -117,6 +120,7 @@ export default function ProjectsPage() {
         },
       });
 
+      console.log('[Projects] Upload complete, refreshing project list');
       // Reset Form & Close
       setProjName('');
       setProjFile(null);
@@ -131,9 +135,11 @@ export default function ProjectsPage() {
 
   const startStream = async (id: string) => {
     try {
+      console.log('[Projects] Starting instance for project:', id);
       // Optimistic update
       setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, status: 'RUNNING' } : p)));
       await api.post(`/projects/${id}/start`);
+      console.log('[Projects] Instance started, redirecting to stream page');
       // Redirect to streaming page
       router.push(`/dashboard/projects/${id}/stream`);
     } catch (err: any) {
@@ -144,6 +150,7 @@ export default function ProjectsPage() {
 
   const stopStream = async (id: string) => {
     try {
+      console.log('[Projects] Stopping instance for project:', id);
       setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, status: 'STOPPED' } : p)));
       await api.post(`/projects/${id}/stop`);
       fetchProjects();

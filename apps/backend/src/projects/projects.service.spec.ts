@@ -210,6 +210,42 @@ describe('ProjectsService — version-detection & flag generation', () => {
       }
     });
 
+    it('finds .sh in subdirectory when not at root', () => {
+      jest.spyOn(fs, 'readdirSync')
+        .mockReturnValueOnce([
+          { name: 'MyProject', isFile: () => false, isDirectory: () => true } as any,
+        ])
+        .mockReturnValueOnce([
+          { name: 'MyProject.sh', isFile: () => true, isDirectory: () => false } as any,
+        ]);
+
+      const result = findScript('/fake/build');
+      if ((service as any).isLinux) {
+        expect(result).toBe(path.join('/fake/build', 'MyProject', 'MyProject.sh'));
+      } else {
+        expect(result).toBeNull();
+      }
+    });
+
+    it('skips Engine/ and Build/ subdirectories', () => {
+      jest.spyOn(fs, 'readdirSync').mockReturnValue([
+        { name: 'Engine', isFile: () => false, isDirectory: () => true } as any,
+        { name: 'Build', isFile: () => false, isDirectory: () => true } as any,
+      ]);
+
+      const result = findScript('/fake/build');
+      expect(result).toBeNull();
+    });
+
+    it('skips excluded scripts like Build.sh', () => {
+      jest.spyOn(fs, 'readdirSync').mockReturnValue([
+        { name: 'Build.sh', isFile: () => true, isDirectory: () => false } as any,
+      ]);
+
+      const result = findScript('/fake/build');
+      expect(result).toBeNull();
+    });
+
     it('returns null when no launcher scripts exist', () => {
       jest.spyOn(fs, 'readdirSync').mockReturnValue([
         { name: 'Manifest.txt', isFile: () => true, isDirectory: () => false } as any,
@@ -261,6 +297,8 @@ describe('ProjectsService — version-detection & flag generation', () => {
 
   describe('getUEEnvironment', () => {
     it('returns Vulkan/Mesa env vars on Linux', () => {
+      // Mock existsSync to return true for ICD path check
+      jest.spyOn(fs, 'existsSync').mockReturnValue(true);
       const env = (service as any).getUEEnvironment();
       // Service may be on any platform, but the method checks this.isLinux
       if ((service as any).isLinux) {
@@ -270,6 +308,18 @@ describe('ProjectsService — version-detection & flag generation', () => {
         expect(env).toHaveProperty('XDG_RUNTIME_DIR');
       } else {
         expect(env).toEqual({});
+      }
+    });
+
+    it('auto-detects Vulkan ICD when default path missing', () => {
+      jest.spyOn(fs, 'existsSync')
+        .mockReturnValueOnce(false) // default ICD path doesn't exist
+        .mockReturnValueOnce(true); // /usr/share/vulkan/icd.d exists
+      jest.spyOn(fs, 'readdirSync').mockReturnValue(['lvp_icd_x86_64.json'] as any);
+
+      const env = (service as any).getUEEnvironment();
+      if ((service as any).isLinux) {
+        expect(env.VK_ICD_FILENAMES).toBe('/usr/share/vulkan/icd.d/lvp_icd_x86_64.json');
       }
     });
   });

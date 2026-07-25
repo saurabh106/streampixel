@@ -183,6 +183,10 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       // This strips that marker so executables can launch without user prompts.
       this.removeZoneIdentifier(projectDir);
 
+      // Fix permissions on extracted files. ZIP/RAR archives often lose Unix permission bits,
+      // so .sh launcher scripts and ELF binaries won't be executable after extraction.
+      this.fixExtractedPermissions(projectDir);
+
       // Search for executable
       this.logger.log(`Scanning extracted project for Unreal Engine executable...`);
       const exeFullPath = this.findExecutable(projectDir);
@@ -515,53 +519,50 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       this.logger.log(`Signaling server HTTP handler confirmed ready on port ${playerPort}`);
     }
 
-    if (!project.executablePath || !project.extractedPath) {
-      // No executable was detected during upload — this is a hard error, not a simulation fallback
-      this.logger.error(
-        `Project "${project.name}" has no executablePath recorded. ` +
-          `The upload scan did not find a valid executable in the archive. ` +
-          `Ensure your packaged build folder contains the project binary at its expected location.`,
-      );
-      // Clean up the signaling server we just spawned
+    if (!project.extractedPath) {
+      this.logger.error(`Project "${project.name}" has no extractedPath recorded.`);
       if (signalingProcess && signalingProcess.pid) {
         this.killProcessTree(signalingProcess.pid);
       }
       throw new BadRequestException(
-        `No Unreal Engine executable found in project "${project.name}". ` +
-          `Ensure your packaged build contains a project binary at the root level of the archive (not inside Engine/). ` +
-          `On Linux, the binary must also have the execute permission bit set. ` +
-          `The uploaded archive was scanned and no valid project executable was detected.`,
+        `Project "${project.name}" has no extracted directory. The upload may have failed.`,
       );
     }
-
-    const absoluteExePath = path.resolve(project.extractedPath, project.executablePath);
-    if (!fs.existsSync(absoluteExePath)) {
-      this.logger.error(
-        `Executable path recorded as "${project.executablePath}" but file does not exist at ${absoluteExePath}`,
-      );
-      if (signalingProcess && signalingProcess.pid) {
-        this.killProcessTree(signalingProcess.pid);
-      }
-      throw new BadRequestException(
-        `Executable file not found at expected path: ${project.executablePath}. ` +
-          `The file may have been moved or deleted after upload.`,
-      );
-    }
-
-    // Double-ensure execution permissions are set on the binary before attempting to spawn
-    this.ensureExecutable(absoluteExePath);
 
     // Find the UE build root — the directory containing Engine/ — which is the correct CWD.
     // The .sh launcher script and UE binary both expect to run from the build root,
     // not from Binaries/Linux/ where the binary lives.
-    const buildRoot = this.findBuildRoot(path.dirname(absoluteExePath));
+    // We try to find build root from the executable path first; if no executable was found
+    // during upload, fall back to the extracted root and search for a launcher script.
+    let buildRoot: string | null = null;
+    let absoluteExePath: string | null = null;
+
+    if (project.executablePath) {
+      absoluteExePath = path.resolve(project.extractedPath, project.executablePath);
+      if (!fs.existsSync(absoluteExePath)) {
+        this.logger.warn(
+          `Executable path recorded as "${project.executablePath}" but file does not exist at ${absoluteExePath}. ` +
+            `Will try to find a launcher script instead.`,
+        );
+        absoluteExePath = null;
+      } else {
+        this.ensureExecutable(absoluteExePath);
+        buildRoot = this.findBuildRoot(path.dirname(absoluteExePath));
+      }
+    }
+
+    // If no executable found or it was missing, search from the extracted root
+    if (!buildRoot) {
+      buildRoot = this.findBuildRoot(project.extractedPath);
+    }
+
     if (!buildRoot) {
       this.logger.warn(
-        `Could not locate build root (Engine/ directory) above ${absoluteExePath}. ` +
-          `Falling back to binary directory as CWD.`,
+        `Could not locate build root (Engine/ directory) in ${project.extractedPath}. ` +
+          `Falling back to extracted root as CWD.`,
       );
     }
-    const ueCwd = buildRoot || path.dirname(absoluteExePath);
+    const ueCwd = buildRoot || project.extractedPath;
     this.logger.log(`UE build root (CWD): ${ueCwd}`);
 
     // Create Saved/Logs/ and Config/ directories — UE needs these to initialize properly.
@@ -571,6 +572,38 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     // because it respects the build's own environment setup and is compatible with
     // custom UE builds that may have additional launch logic.
     const launcherScript = this.findLauncherScript(ueCwd);
+
+    // If no executable was found during upload, try to extract one from the launcher script
+    if (!absoluteExePath && launcherScript) {
+      absoluteExePath = this.extractBinaryPathFromScript(launcherScript);
+      if (absoluteExePath && !fs.existsSync(absoluteExePath)) {
+        this.logger.warn(
+          `Binary path extracted from launcher script (${absoluteExePath}) does not exist. ` +
+            `Will rely on launcher script to find the binary.`,
+        );
+        absoluteExePath = null;
+      }
+      if (absoluteExePath) {
+        this.ensureExecutable(absoluteExePath);
+      }
+    }
+
+    // Final check: we need either a launcher script or an executable to proceed
+    if (!launcherScript && !absoluteExePath) {
+      this.logger.error(
+        `Project "${project.name}" has no executablePath and no launcher script found in ${ueCwd}. ` +
+          `The upload scan did not find a valid executable, and no .sh/.bat launcher was detected. ` +
+          `Ensure your packaged build contains either a project binary or a launcher script.`,
+      );
+      if (signalingProcess && signalingProcess.pid) {
+        this.killProcessTree(signalingProcess.pid);
+      }
+      throw new BadRequestException(
+        `No Unreal Engine executable or launcher script found in project "${project.name}". ` +
+          `Ensure your packaged build contains a project binary (with +x permission on Linux) ` +
+          `or a .sh launcher script at the build root level.`,
+      );
+    }
 
     // Ensure the launcher script is executable.
     // On Linux: extracted archives strip Unix permission bits — chmod +x is required.
@@ -663,16 +696,19 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         // Fallback: no launcher script found — spawn the binary directly with project name prefix.
         // On Linux, the binary requires the project name as the first argument.
         // On Windows, same pattern — .exe expects ProjectName before flags.
+        // absoluteExePath is guaranteed non-null here: the validation above ensures
+        // either launcherScript or absoluteExePath exists, and we're in the !launcherScript branch.
+        const exePath = absoluteExePath!;
         const projectName = this.parseLauncherScript(ueCwd);
         const positionalArgs = projectName ? [projectName] : [];
-        this.logger.log(`No launcher script found. Spawning binary directly: ${absoluteExePath}`);
+        this.logger.log(`No launcher script found. Spawning binary directly: ${exePath}`);
 
-        const isWindowsExeOnLinux = this.isLinux && absoluteExePath.toLowerCase().endsWith('.exe');
+        const isWindowsExeOnLinux = this.isLinux && exePath.toLowerCase().endsWith('.exe');
         if (isWindowsExeOnLinux) {
           const wineBin = fs.existsSync('/usr/bin/wine64') ? 'wine64' : 'wine';
-          ueProcess = spawn(wineBin, [absoluteExePath, ...positionalArgs, ...ueArgs], spawnOptions);
+          ueProcess = spawn(wineBin, [exePath, ...positionalArgs, ...ueArgs], spawnOptions);
         } else {
-          ueProcess = spawn(absoluteExePath, [...positionalArgs, ...ueArgs], spawnOptions);
+          ueProcess = spawn(exePath, [...positionalArgs, ...ueArgs], spawnOptions);
         }
       }
 
@@ -1167,7 +1203,10 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   //   - UE 5.5+:            -PixelStreamingSignallingURL (single connection string)
   //
   // This is the single place to update when Epic changes flag names in a future version.
-  private getPixelStreamingArgs(streamerPort: number, version: { major: number; minor: number } | null): string[] {
+  private getPixelStreamingArgs(
+    streamerPort: number,
+    version: { major: number; minor: number } | null,
+  ): string[] {
     if (version && (version.major > 5 || (version.major === 5 && version.minor >= 5))) {
       // UE 5.5+ — single-flag connection string
       return [`-PixelStreamingSignallingURL=ws://127.0.0.1:${streamerPort}`];
@@ -1176,10 +1215,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     // UE 5.4 and earlier — two separate flags
     // Also the safe fallback for missing/unknown versions, since the older
     // flags are more widely recognized across all UE5 releases.
-    return [
-      `-PixelStreamingIP=127.0.0.1`,
-      `-PixelStreamingPort=${streamerPort}`,
-    ];
+    return [`-PixelStreamingIP=127.0.0.1`, `-PixelStreamingPort=${streamerPort}`];
   }
 
   // Binary exclusion list — filenames/substrings that are NEVER the project executable.
@@ -1282,6 +1318,75 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
+  // Fix permissions on all .sh scripts and ELF binaries after extraction.
+  // ZIP and RAR archives do not preserve Unix permission bits, so extracted files
+  // lose their +x bit. This walks the extracted directory and sets +x on:
+  //   - All .sh files (launcher scripts)
+  //   - All ELF binaries (detected by \x7fELF magic bytes)
+  // This runs once at upload time so startInstance() doesn't need to fix permissions later.
+  private fixExtractedPermissions(dir: string): void {
+    if (!this.isLinux) return;
+
+    let fixedCount = 0;
+    const walk = (currentDir: string) => {
+      let entries: fs.Dirent[];
+      try {
+        entries = fs.readdirSync(currentDir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const fullPath = path.join(currentDir, entry.name);
+        if (entry.isDirectory()) {
+          // Skip Engine/ internals — those don't need +x
+          if (entry.name === 'Engine') continue;
+          walk(fullPath);
+        } else if (entry.isFile()) {
+          const lower = entry.name.toLowerCase();
+          let needsChmod = false;
+
+          // .sh launcher scripts always need +x
+          if (lower.endsWith('.sh')) {
+            needsChmod = true;
+          }
+
+          // ELF binaries need +x (check magic bytes)
+          if (!needsChmod && !lower.endsWith('.so') && !lower.endsWith('.pak')) {
+            try {
+              const fd = fs.openSync(fullPath, 'r');
+              const buf = Buffer.alloc(4);
+              fs.readSync(fd, buf, 0, 4, 0);
+              fs.closeSync(fd);
+              if (buf[0] === 0x7f && buf[1] === 0x45 && buf[2] === 0x4c && buf[3] === 0x46) {
+                needsChmod = true;
+              }
+            } catch {
+              // Ignore read errors
+            }
+          }
+
+          if (needsChmod) {
+            try {
+              fs.chmodSync(fullPath, 0o755);
+              fixedCount++;
+            } catch {
+              // Non-fatal — startInstance will also call ensureExecutable as a fallback
+            }
+          }
+        }
+      }
+    };
+
+    try {
+      walk(dir);
+      if (fixedCount > 0) {
+        this.logger.log(`Fixed permissions on ${fixedCount} file(s) in ${dir}`);
+      }
+    } catch (err: any) {
+      this.logger.warn(`Failed to fix extracted permissions in ${dir}: ${err.message}`);
+    }
+  }
+
   // Remove the Zone.Identifier alternate data stream from all files in a directory (Windows only).
   // Windows attaches Zone.Identifier:3 ("downloaded from the internet") to files saved from
   // HTTP uploads or extracted from downloaded archives. This causes SmartScreen / "Open File -
@@ -1320,21 +1425,69 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
-  // Find the launcher script in the build root.
+  // Find the launcher script in the build root or one level of subdirectories.
   // On Linux: UE builds ship with a .sh launcher (e.g., ArchVizExplorer.sh).
   // On Windows: UE builds ship with a .bat launcher (e.g., ArchVizExplorer.bat).
   // Running the launcher directly is preferred over calling the raw binary because
   // it handles project name resolution and may contain additional setup logic.
+  //
+  // Search order:
+  //   1. Build root directory (most common location)
+  //   2. One level of subdirectories (e.g., MyProject/MyProject.sh)
+  //
+  // Scripts inside Engine/ or Build/ are excluded — those are build tools, not launchers.
   // Returns the full path to the launcher script, or null if not found.
   private findLauncherScript(buildRoot: string): string | null {
     const ext = this.isLinux ? '.sh' : '.bat';
+
+    // Scripts to skip — these are build/engine tools, not project launchers
+    const excludedScripts = [
+      'Build.sh',
+      'Build.bat',
+      'Setup.sh',
+      'Setup.bat',
+      'CompileShaders',
+      'GenerateProjectFiles',
+      'RunUAT',
+      'RunCook',
+    ];
+
+    const isExcluded = (name: string): boolean => {
+      const lower = name.toLowerCase();
+      return excludedScripts.some((excl) => lower.startsWith(excl.toLowerCase()));
+    };
+
     try {
-      const entries = fs.readdirSync(buildRoot, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isFile() && entry.name.endsWith(ext)) {
+      // PASS 1: Scan build root (most common — e.g., ArchVizExplorer.sh sits at root)
+      const rootEntries = fs.readdirSync(buildRoot, { withFileTypes: true });
+      for (const entry of rootEntries) {
+        if (entry.isFile() && entry.name.endsWith(ext) && !isExcluded(entry.name)) {
           const fullPath = path.join(buildRoot, entry.name);
-          this.logger.log(`Found ${ext} launcher script: ${entry.name}`);
+          this.logger.log(`Found ${ext} launcher script at build root: ${entry.name}`);
           return fullPath;
+        }
+      }
+
+      // PASS 2: Scan one level of subdirectories (e.g., MyProject/MyProject.sh)
+      for (const entry of rootEntries) {
+        if (!entry.isDirectory()) continue;
+        // Skip Engine/ and Build/ — those contain engine tools, not project launchers
+        if (entry.name === 'Engine' || entry.name === 'Build') continue;
+
+        const subDir = path.join(buildRoot, entry.name);
+        try {
+          const subEntries = fs.readdirSync(subDir, { withFileTypes: true });
+          for (const subEntry of subEntries) {
+            if (subEntry.isFile() && subEntry.name.endsWith(ext) && !isExcluded(subEntry.name)) {
+              const fullPath = path.join(subDir, subEntry.name);
+              this.logger.log(
+                `Found ${ext} launcher script in subdirectory ${entry.name}/: ${subEntry.name}`,
+              );
+              return fullPath;
+            }
+          }
+        } catch {
+          // Skip unreadable subdirectories
         }
       }
     } catch (err: any) {
@@ -1344,9 +1497,19 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   }
 
   // Parse the launcher script to extract the project name (used as fallback for binary spawn).
-  // Linux (.sh):  "$SCRIPT_DIR/ArchVizExplorer/Binaries/Linux/ArchVizExplorer-Linux-Shipping" ArchVizExplorer "$@"
-  // Windows (.bat): "%~dp0ArchVizExplorer\Binaries\Win64\ArchVizExplorer.exe" ArchVizExplorer %*
-  // The project name is the argument right after the binary path in both formats.
+  // UE packaged builds generate launcher scripts in several formats:
+  //
+  // Linux (.sh):
+  //   "$SCRIPT_DIR/MyProject/Binaries/Linux/MyProject-Linux-Shipping" MyProject "$@"
+  //   exec "$DIR/MyProject/Binaries/Linux/MyProject" "$@"
+  //   ./MyProject/Binaries/Linux/MyProject-Test MyProject -game "$@"
+  //
+  // Windows (.bat):
+  //   "%~dp0MyProject\Binaries\Win64\MyProject.exe" MyProject %*
+  //   "%~dp0MyProject\Binaries\Win64\MyProject-Win64-Shipping.exe" MyProject %*
+  //
+  // The project name is the first positional argument right after the binary path.
+  // On some builds it's omitted (relying on UE to infer from the binary name).
   private parseLauncherScript(buildRoot: string): string | null {
     const ext = this.isLinux ? '.sh' : '.bat';
     try {
@@ -1354,19 +1517,110 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       for (const entry of entries) {
         if (entry.isFile() && entry.name.endsWith(ext)) {
           const content = fs.readFileSync(path.join(buildRoot, entry.name), 'utf-8');
-          const match = content.match(
-            /["']?[^"']*Binaries[^"']*["']?\s+([A-Za-z_][A-Za-z0-9_]*)\s/,
+          const lines = content.split('\n');
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            // Skip comments and empty lines
+            if (!trimmed || trimmed.startsWith('#')) continue;
+
+            // Pattern 1: Quoted binary path + project name
+            const quotedMatch = trimmed.match(/["']([^"']+)["']\s+(.+)/);
+            if (quotedMatch) {
+              const args = quotedMatch[2].trim().split(/\s+/);
+              // Find first arg that looks like a project name (not a flag like -game, -game)
+              for (const arg of args) {
+                if (arg.startsWith('-')) continue;
+                if (arg === '"$@"' || arg === '$@' || arg === '%*' || arg === '"$*"') continue;
+                const clean = arg.replace(/["']/g, '');
+                if (/^[A-Za-z_][A-Za-z0-9_-]*$/.test(clean)) {
+                  this.logger.log(
+                    `Parsed launcher script ${entry.name}: project name = "${clean}"`,
+                  );
+                  return clean;
+                }
+              }
+            }
+
+            // Pattern 2: Unquoted path or exec command
+            const unquotedMatch = trimmed.match(/(?:exec\s+)?(\S+\/\S+|[.][/]\S+)\s+(.+)/);
+            if (unquotedMatch) {
+              const args = unquotedMatch[2].trim().split(/\s+/);
+              for (const arg of args) {
+                if (arg.startsWith('-')) continue;
+                if (arg === '"$@"' || arg === '$@' || arg === '%*' || arg === '"$*"') continue;
+                const clean = arg.replace(/["']/g, '');
+                if (/^[A-Za-z_][A-Za-z0-9_-]*$/.test(clean)) {
+                  this.logger.log(
+                    `Parsed launcher script ${entry.name}: project name = "${clean}"`,
+                  );
+                  return clean;
+                }
+              }
+            }
+          }
+
+          // Last resort: try to extract project name from the binary filename itself
+          // e.g., MyProject-Linux-Shipping -> MyProject
+          const binaryNameMatch = content.match(
+            /Binaries\/[^"'\s]*?([A-Za-z_][A-Za-z0-9_]*?)(?:-Linux|-Win64|-Shipping|-Test|-Debug)?["']/,
           );
-          if (match) {
+          if (binaryNameMatch) {
             this.logger.log(
-              `Parsed launcher script ${entry.name}: project name = "${match[1]}"`,
+              `Parsed launcher script ${entry.name}: project name from binary = "${binaryNameMatch[1]}"`,
             );
-            return match[1];
+            return binaryNameMatch[1];
           }
         }
       }
     } catch (err: any) {
       this.logger.warn(`Failed to parse launcher scripts in ${buildRoot}: ${err.message}`);
+    }
+    return null;
+  }
+
+  // Extract the full binary path from a launcher script.
+  // When no executable was found during upload (e.g., the binary was nested or lacked +x),
+  // this method parses the .sh/.bat script to find the binary path that the script invokes.
+  // Returns the resolved absolute path, or null if parsing fails.
+  private extractBinaryPathFromScript(scriptPath: string): string | null {
+    try {
+      const content = fs.readFileSync(scriptPath, 'utf-8');
+      const lines = content.split('\n');
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+
+        // Match quoted binary path: "$SCRIPT_DIR/.../Binary" or "$DIR/.../Binary"
+        const quotedMatch = trimmed.match(/["']([^"']+)["']/);
+        if (quotedMatch) {
+          const rawPath = quotedMatch[1];
+          // Resolve shell variables like $SCRIPT_DIR, $DIR, $(dirname "$0")
+          const resolved = rawPath
+            .replace(/\$SCRIPT_DIR/g, path.dirname(scriptPath))
+            .replace(/\$DIR/g, path.dirname(scriptPath))
+            .replace(/\$\{?DIR\}?/g, path.dirname(scriptPath))
+            .replace(/\$0/g, scriptPath)
+            .replace(/\$\(dirname ["']?\$0["']?\)/g, path.dirname(scriptPath));
+
+          if (fs.existsSync(resolved)) {
+            this.logger.log(`Extracted binary path from launcher script: ${resolved}`);
+            return resolved;
+          }
+
+          // Try relative to script directory
+          const relativeResolved = path.resolve(path.dirname(scriptPath), resolved);
+          if (fs.existsSync(relativeResolved)) {
+            this.logger.log(
+              `Extracted binary path (relative) from launcher script: ${relativeResolved}`,
+            );
+            return relativeResolved;
+          }
+        }
+      }
+    } catch (err: any) {
+      this.logger.warn(`Failed to extract binary path from ${scriptPath}: ${err.message}`);
     }
     return null;
   }
@@ -1399,19 +1653,44 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   private getUEEnvironment(display?: string): Record<string, string> {
     if (!this.isLinux) return {};
 
+    // Auto-detect the Vulkan ICD (Installable Client Driver) path.
+    // The hardcoded path may not exist on all distros — find the lavapipe ICD dynamically.
+    let vkIcdPath = process.env.VK_ICD_FILENAMES || '/usr/share/vulkan/icd.d/lvp_icd.x86_64.json';
+    if (!fs.existsSync(vkIcdPath)) {
+      try {
+        const icdDir = '/usr/share/vulkan/icd.d';
+        if (fs.existsSync(icdDir)) {
+          const icdFiles = fs
+            .readdirSync(icdDir)
+            .filter((f) => f.includes('lvp') && f.endsWith('.json'));
+          if (icdFiles.length > 0) {
+            vkIcdPath = path.join(icdDir, icdFiles[0]);
+            this.logger.log(`Auto-detected Vulkan ICD: ${vkIcdPath}`);
+          } else {
+            // Try any swrast or llvmpipe ICD
+            const anyIcd = fs.readdirSync(icdDir).filter((f) => f.endsWith('.json'));
+            if (anyIcd.length > 0) {
+              vkIcdPath = path.join(icdDir, anyIcd[0]);
+              this.logger.log(`Using fallback Vulkan ICD: ${vkIcdPath}`);
+            }
+          }
+        }
+      } catch {
+        this.logger.warn(`Could not auto-detect Vulkan ICD, using default: ${vkIcdPath}`);
+      }
+    }
+
     const env: Record<string, string> = {
-      VK_ICD_FILENAMES: '/usr/share/vulkan/icd.d/lvp_icd.x86_64.json',
+      VK_ICD_FILENAMES: vkIcdPath,
       GALLIUM_DRIVER: 'llvmpipe',
       MESA_GL_VERSION_OVERRIDE: '4.5',
       MESA_LOADER_DRIVER_OVERRIDE: 'lvp',
       RADV_PERFTEST: 'gpl',
       XDG_RUNTIME_DIR: '/tmp/runtime-root',
-      // Pass through system PATH and HOME so the child process can find system binaries
       PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
       HOME: process.env.HOME || '/tmp',
     };
 
-    // Set DISPLAY if xvfb is running — UE needs a display server to initialize rendering
     if (display) {
       env.DISPLAY = display;
     }

@@ -35,16 +35,24 @@ export const getAccessToken = () => {
 
 api.interceptors.request.use(
   (config) => {
+    console.log(
+      `[API] ${config.method?.toUpperCase()} ${config.baseURL}${config.url}`,
+      config.data instanceof FormData ? '(FormData)' : config.data || '',
+    );
     if (cachedAccessToken && config.headers) {
       config.headers['Authorization'] = `Bearer ${cachedAccessToken}`;
     }
     return config;
   },
-  (error) => Promise.reject(error),
+  (error) => {
+    console.error('[API] Request setup error:', error);
+    return Promise.reject(error);
+  },
 );
 
 api.interceptors.response.use(
   (response) => {
+    console.log(`[API] Response ${response.status} ${response.config.url}`, response.data);
     if (response.data && response.data.success) {
       return response.data.data;
     }
@@ -52,6 +60,10 @@ api.interceptors.response.use(
   },
   async (error) => {
     const originalRequest = error.config;
+    console.error(
+      `[API] Error ${error.response?.status || 'NETWORK'} ${originalRequest?.url}:`,
+      error.response?.data || error.message,
+    );
 
     if (
       error.response?.status === 401 &&
@@ -62,6 +74,7 @@ api.interceptors.response.use(
       !originalRequest.url?.includes('/auth/register')
     ) {
       if (isRefreshing) {
+        console.log('[API] Token refresh in progress, queueing request');
         return new Promise((resolve, reject) => {
           failedQueue.push({ resolve, reject });
         })
@@ -76,6 +89,7 @@ api.interceptors.response.use(
       isRefreshing = true;
 
       try {
+        console.log('[API] Attempting token refresh...');
         const res = await axios.post(
           `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api/v1'}/auth/refresh`,
           {},
@@ -88,10 +102,12 @@ api.interceptors.response.use(
         setAccessToken(newAccessToken);
         processQueue(null, newAccessToken);
         isRefreshing = false;
+        console.log('[API] Token refresh succeeded, retrying queued requests');
 
         originalRequest.headers['Authorization'] = `Bearer ${newAccessToken}`;
         return api(originalRequest);
       } catch (refreshError) {
+        console.error('[API] Token refresh failed:', refreshError);
         processQueue(refreshError, null);
         isRefreshing = false;
         isSessionExpired = true;

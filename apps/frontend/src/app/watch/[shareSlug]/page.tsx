@@ -30,11 +30,17 @@ export default function PublicWatchPage() {
       setError(null);
 
       const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000/api/v1';
+      console.log('[Watch] Fetching shared project, slug:', shareSlug, 'attempt:', retryCount + 1);
       const res = await axios.get(`${API_URL}/public/projects/share/${shareSlug}`, {
         timeout: 30000,
       });
 
       const data = res.data.success ? res.data.data : res.data;
+      console.log('[Watch] Shared project response:', {
+        status: data.status,
+        port: data.port,
+        isSimulated: data.isSimulated,
+      });
       setProject(data);
       setInstancePort(data.port);
       setIsSimulated(data.isSimulated);
@@ -42,6 +48,7 @@ export default function PublicWatchPage() {
     } catch (err: any) {
       const errMsg =
         err.response?.data?.error?.message || err.message || 'Failed to connect to stream';
+      console.error('[Watch] Failed to fetch shared project:', errMsg, 'attempt:', retryCount + 1);
 
       if (retryCount < 3) {
         setTimeout(() => fetchSharedProject(retryCount + 1), 2000);

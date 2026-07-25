@@ -44,6 +44,7 @@ export default function StreamPlayerPage() {
     const pollInterval = setInterval(async () => {
       try {
         const health: any = await api.get(`/projects/${id}/health`);
+        console.log('[Stream] Health check:', health.status, health.ueAlive ? 'UE alive' : 'UE dead');
         if (health.status === 'ERROR') {
           const errMsg = health.error || 'Unreal Engine process crashed unexpectedly';
           setInstanceError(errMsg);
@@ -65,12 +66,19 @@ export default function StreamPlayerPage() {
     try {
       setLoading(true);
       setError(null);
+      console.log('[Stream] Fetching project details for:', id);
       const data: any = await api.get(`/projects/${id}`);
+      console.log('[Stream] Project data:', {
+        name: data.name,
+        status: data.status,
+        instances: data.instances?.length,
+      });
       setProject(data);
 
       if (data.status === 'RUNNING') {
         const activeInstance = data.instances?.find((i: any) => i.status === 'RUNNING');
         if (activeInstance) {
+          console.log('[Stream] Found active instance on port:', activeInstance.port, 'pid:', activeInstance.pid);
           setInstancePort(activeInstance.port);
           setIsSimulated(activeInstance.pid === 9999);
         }
@@ -87,9 +95,11 @@ export default function StreamPlayerPage() {
     try {
       setLoading(true);
       setError(null);
+      console.log('[Stream] Starting instance for project:', id);
       addLog('Launching project instance on server...');
 
       const res: any = await api.post(`/projects/${id}/start`);
+      console.log('[Stream] Instance started:', res);
       addLog(res.message || 'Instance started successfully');
       setInstancePort(res.port);
       setIsSimulated(res.isSimulated);
@@ -107,6 +117,7 @@ export default function StreamPlayerPage() {
   const stopInstance = async () => {
     try {
       setLoading(true);
+      console.log('[Stream] Stopping instance for project:', id);
       addLog('Stopping project instance...');
 
       await api.post(`/projects/${id}/stop`);
