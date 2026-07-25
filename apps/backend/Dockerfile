@@ -26,7 +26,7 @@ RUN cd apps/backend && npx prisma generate && npm run build
 FROM node:20-slim AS production
 RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip curl ca-certificates \
-    libvulkan1 vulkan-tools mesa-vulkan-drivers mesa-vulkan-drivers-dev \
+    libvulkan1 vulkan-tools mesa-vulkan-drivers \
     libgl1-mesa-dri libglx-mesa0 libgl1-mesa-glx libegl-mesa0 \
     xvfb xauth \
     xdg-utils xdg-user-dirs \
