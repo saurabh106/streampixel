@@ -1430,25 +1430,42 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   // Read Engine/Build/Build.version from a packaged UE build.
   // Returns { major, minor } or null if the file is missing/unreadable.
   private readBuildVersion(buildRoot: string): { major: number; minor: number } | null {
-    const versionPath = path.join(buildRoot, 'Engine', 'Build', 'Build.version');
-    this.logger.log(`[Version] Reading Build.version from: ${versionPath}`);
-    try {
-      if (fs.existsSync(versionPath)) {
-        const raw = fs.readFileSync(versionPath, 'utf-8');
-        this.logger.log(`[Version] Build.version content: ${raw.trim()}`);
+    let foundPath: string | null = null;
+    const search = (dir: string, depth = 0) => {
+      if (depth > 4 || foundPath) return;
+      try {
+        const target = path.join(dir, 'Engine', 'Build', 'Build.version');
+        if (fs.existsSync(target)) {
+          foundPath = target;
+          return;
+        }
+        const entries = fs.readdirSync(dir, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isDirectory() && entry.name !== 'Paks' && entry.name !== 'node_modules' && !entry.name.startsWith('.')) {
+            search(path.join(dir, entry.name), depth + 1);
+          }
+        }
+      } catch {}
+    };
+    search(buildRoot);
+
+    if (foundPath) {
+      this.logger.log(`[Version] Reading Build.version from: ${foundPath}`);
+      try {
+        const raw = fs.readFileSync(foundPath, 'utf-8');
         const version = JSON.parse(raw);
         const major = version.MajorVersion ?? 0;
         const minor = version.MinorVersion ?? 0;
         this.logger.log(
-          `[Version] Engine version: UE ${major}.${minor} ` +
+          `[Version] Engine version detected: UE ${major}.${minor} ` +
             `(MajorVersion=${major}, MinorVersion=${minor})`,
         );
         return { major, minor };
-      } else {
-        this.logger.warn(`[Version] Build.version NOT FOUND at ${versionPath}`);
+      } catch (err: any) {
+        this.logger.warn(`[Version] Failed to parse Build.version at ${foundPath}: ${err.message}`);
       }
-    } catch (err: any) {
-      this.logger.warn(`[Version] Failed to read Build.version at ${versionPath}: ${err.message}`);
+    } else {
+      this.logger.warn(`[Version] Build.version NOT FOUND under ${buildRoot}`);
     }
     return null;
   }
@@ -1457,53 +1474,27 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   // At upload time we don't know the build root, so we walk subdirectories looking for it.
   // Returns a string like "UE 5.6" or "Unknown" if detection fails.
   private detectUEVersion(dir: string): string {
-    // Try the direct path first (dir might already be the build root)
     const direct = this.readBuildVersion(dir);
     if (direct) return `UE ${direct.major}.${direct.minor}`;
-
-    // Walk one level of subdirectories to find Engine/Build/Build.version
-    try {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-        if (entry.name === 'Engine') {
-          // Found Engine/ at this level — Build.version should be right here
-          const ver = this.readBuildVersion(dir);
-          if (ver) return `UE ${ver.major}.${ver.minor}`;
-        }
-        // Check one level deeper
-        const subDir = path.join(dir, entry.name);
-        const subVer = this.readBuildVersion(subDir);
-        if (subVer) return `UE ${subVer.major}.${subVer.minor}`;
-      }
-    } catch {
-      // Ignore scan errors
-    }
-
-    this.logger.warn(`Could not auto-detect UE version from ${dir}`);
     return 'Unknown';
   }
 
   // Return the correct PixelStreaming connection flags for the given engine version.
-  //
   // Flag naming changed between UE versions:
-  //   - UE 5.4 and earlier: -PixelStreamingIP + -PixelStreamingPort (two separate flags)
-  //   - UE 5.5+:            -PixelStreamingSignallingURL (single connection string)
-  //
-  // This is the single place to update when Epic changes flag names in a future version.
+  //   - UE 5.4 and earlier: -PixelStreamingIP + -PixelStreamingPort
+  //   - UE 5.5+:            -PixelStreamingSignallingURL / -PixelStreamingURL
+  // Passing both modern and legacy sets of flags ensures compatibility regardless of plugin version.
   private getPixelStreamingArgs(
     streamerPort: number,
     version: { major: number; minor: number } | null,
   ): string[] {
-    if (version && (version.major > 5 || (version.major === 5 && version.minor >= 5))) {
-      // UE 5.5+ — single-flag connection string
-      return [`-PixelStreamingSignallingURL=ws://127.0.0.1:${streamerPort}`];
-    }
-
-    // UE 5.4 and earlier — two separate flags
-    // Also the safe fallback for missing/unknown versions, since the older
-    // flags are more widely recognized across all UE5 releases.
-    return [`-PixelStreamingIP=127.0.0.1`, `-PixelStreamingPort=${streamerPort}`];
+    const signallingUrl = `ws://127.0.0.1:${streamerPort}`;
+    return [
+      `-PixelStreamingSignallingURL=${signallingUrl}`,
+      `-PixelStreamingURL=${signallingUrl}`,
+      `-PixelStreamingIP=127.0.0.1`,
+      `-PixelStreamingPort=${streamerPort}`,
+    ];
   }
 
   // Binary exclusion list — filenames/substrings that are NEVER the project executable.
@@ -2022,9 +2013,11 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
 
     const env: Record<string, string> = {
       VK_ICD_FILENAMES: vkIcdPath,
+      VK_DRIVER_FILES: vkIcdPath,
       GALLIUM_DRIVER: 'llvmpipe',
       MESA_GL_VERSION_OVERRIDE: '4.5',
       MESA_LOADER_DRIVER_OVERRIDE: 'lvp',
+      LIBGL_ALWAYS_SOFTWARE: '1',
       RADV_PERFTEST: 'gpl',
       XDG_RUNTIME_DIR: '/tmp/runtime-root',
       PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
