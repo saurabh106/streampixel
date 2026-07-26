@@ -82,7 +82,9 @@ RUN npm rebuild bcrypt
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/apps/backend/dist ./apps/backend/dist
 COPY apps/backend/src/projects/vulkan_spoof.c ./apps/backend/src/projects/vulkan_spoof.c
-RUN gcc -shared -fPIC -O2 /app/apps/backend/src/projects/vulkan_spoof.c -o /usr/lib/libvulkan_spoof.so -ldl
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc-dev && \
+    gcc -shared -fPIC -O2 /app/apps/backend/src/projects/vulkan_spoof.c -o /usr/lib/libvulkan_spoof.so -ldl && \
+    rm -rf /var/lib/apt/lists/*
 RUN npx prisma generate --schema=./apps/backend/prisma/schema.prisma
 RUN chown -R node:node /app /opt/streampixel/storage
 USER node
