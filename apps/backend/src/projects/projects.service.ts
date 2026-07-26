@@ -2008,6 +2008,43 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Could not auto-detect Vulkan ICD, using default: ${vkIcdPath}`);
     }
 
+    // Locate or compile libvulkan_spoof.so for Vulkan device property spoofing
+    let spoofLibPath: string | null = null;
+    const candidateSpoofs = [
+      '/usr/lib/libvulkan_spoof.so',
+      path.resolve(__dirname, 'libvulkan_spoof.so'),
+      path.resolve(__dirname, '..', 'libvulkan_spoof.so'),
+      '/tmp/libvulkan_spoof.so',
+    ];
+    for (const cand of candidateSpoofs) {
+      if (fs.existsSync(cand)) {
+        spoofLibPath = cand;
+        break;
+      }
+    }
+
+    if (!spoofLibPath) {
+      const candidateCSources = [
+        path.resolve(__dirname, 'vulkan_spoof.c'),
+        path.resolve(__dirname, '..', 'src', 'projects', 'vulkan_spoof.c'),
+        path.resolve(process.cwd(), 'apps', 'backend', 'src', 'projects', 'vulkan_spoof.c'),
+      ];
+      for (const cSource of candidateCSources) {
+        if (fs.existsSync(cSource)) {
+          const targetSo = '/tmp/libvulkan_spoof.so';
+          try {
+            const { execSync } = require('child_process');
+            execSync(`gcc -shared -fPIC -O2 "${cSource}" -o "${targetSo}" -ldl`, { stdio: 'ignore' });
+            if (fs.existsSync(targetSo)) {
+              spoofLibPath = targetSo;
+              this.logger.log(`Compiled Vulkan spoof wrapper: ${spoofLibPath}`);
+              break;
+            }
+          } catch {}
+        }
+      }
+    }
+
     const env: Record<string, string> = {
       VK_ICD_FILENAMES: vkIcdPath,
       VK_DRIVER_FILES: vkIcdPath,
@@ -2020,6 +2057,11 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       PATH: process.env.PATH || '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin',
       HOME: process.env.HOME || '/tmp',
     };
+
+    if (spoofLibPath) {
+      env.LD_PRELOAD = spoofLibPath;
+      this.logger.log(`Using Vulkan spoofing layer via LD_PRELOAD: ${spoofLibPath}`);
+    }
 
     if (display) {
       env.DISPLAY = display;

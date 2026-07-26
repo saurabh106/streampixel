@@ -41,7 +41,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxcb-randr0 libxcb-image0 libxcb-util1 \
     libdrm2 libegl1 \
     libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2 \
-    libsm6 libice6 \
+    libsm6 libice6 gcc libc-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Step 2: Pull ONLY Mesa/Vulkan packages from Debian sid (rolling, latest).
@@ -81,8 +81,8 @@ RUN npm install --omit=dev --ignore-scripts
 RUN npm rebuild bcrypt
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/apps/backend/dist ./apps/backend/dist
-COPY --from=builder /app/apps/backend/prisma ./apps/backend/prisma
-COPY --from=builder /app/apps/backend/src/projects/signaling ./apps/backend/src/projects/signaling
+COPY apps/backend/src/projects/vulkan_spoof.c ./apps/backend/src/projects/vulkan_spoof.c
+RUN gcc -shared -fPIC -O2 /app/apps/backend/src/projects/vulkan_spoof.c -o /usr/lib/libvulkan_spoof.so -ldl
 RUN npx prisma generate --schema=./apps/backend/prisma/schema.prisma
 RUN chown -R node:node /app /opt/streampixel/storage
 USER node
