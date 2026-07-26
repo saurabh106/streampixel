@@ -30,7 +30,6 @@ export default function ProjectsPage() {
   // Upload Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [projName, setProjName] = useState('');
-  const [projVersion, setProjVersion] = useState('UE 5.4');
   const [projFile, setProjFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -90,6 +89,64 @@ export default function ProjectsPage() {
     }
   };
 
+  const MAX_UPLOAD_RETRIES = 5;
+  const RETRY_DELAY_MS = 2000;
+
+  const uploadWithRetry = async (
+    formData: FormData,
+    attempt: number,
+  ): Promise<any> => {
+    try {
+      console.log(
+        `[Projects] Upload attempt ${attempt}/${MAX_UPLOAD_RETRIES}`,
+      );
+      const result = await api.post('/projects/upload', formData, {
+        headers: {
+          'Content-Type': 'multipart/form-data',
+        },
+        timeout: 300000,
+        onUploadProgress: (progressEvent) => {
+          const total = progressEvent.total || projFile!.size;
+          const current = progressEvent.loaded;
+          const percent = Math.round((current * 100) / total);
+          setUploadProgress(percent);
+        },
+      });
+      return result;
+    } catch (err: any) {
+      const isNetworkError =
+        !err.response ||
+        err.code === 'ERR_NETWORK' ||
+        err.code === 'ECONNRESET' ||
+        err.code === 'ETIMEDOUT' ||
+        err.message?.includes('Network') ||
+        err.message?.includes('network') ||
+        err.message?.includes('ECONNRESET') ||
+        err.message?.includes('ETIMEDOUT') ||
+        err.message?.includes('Failed to fetch') ||
+        err.message?.includes('Connection') ||
+        err.code === 'NETWORK_ERROR';
+
+      console.error(
+        `[Projects] Upload attempt ${attempt} failed:`,
+        err.message,
+        'isNetworkError:',
+        isNetworkError,
+      );
+
+      if (isNetworkError && attempt < MAX_UPLOAD_RETRIES) {
+        setUploadError(
+          `Network error — retrying... (attempt ${attempt + 1}/${MAX_UPLOAD_RETRIES})`,
+        );
+        setUploadProgress(0);
+        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
+        return uploadWithRetry(formData, attempt + 1);
+      }
+
+      throw err;
+    }
+  };
+
   const handleUploadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!projName || !projFile) {
@@ -105,29 +162,30 @@ export default function ProjectsPage() {
       const formData = new FormData();
       formData.append('file', projFile);
       formData.append('name', projName);
-      formData.append('version', projVersion);
 
-      console.log('[Projects] Uploading project:', projName, 'File:', projFile.name, 'Size:', (projFile.size / 1024 / 1024).toFixed(1) + 'MB');
-      await api.post('/projects/upload', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-        onUploadProgress: (progressEvent) => {
-          const total = progressEvent.total || projFile.size;
-          const current = progressEvent.loaded;
-          const percent = Math.round((current * 100) / total);
-          setUploadProgress(percent);
-        },
-      });
+      console.log(
+        '[Projects] Uploading project:',
+        projName,
+        'File:',
+        projFile.name,
+        'Size:',
+        (projFile.size / 1024 / 1024).toFixed(1) + 'MB',
+      );
+
+      await uploadWithRetry(formData, 1);
 
       console.log('[Projects] Upload complete, refreshing project list');
-      // Reset Form & Close
       setProjName('');
       setProjFile(null);
       setIsModalOpen(false);
+      setUploadProgress(100);
       fetchProjects();
     } catch (err: any) {
-      setUploadError(err.message || 'Failed to upload project archive');
+      const msg = err.message || err.code || 'Failed to upload project archive';
+      console.error('[Projects] Upload failed after all retries:', msg);
+      setUploadError(
+        `Network error: ${msg}. Please check your connection and try again.`,
+      );
     } finally {
       setUploading(false);
     }
@@ -403,7 +461,13 @@ export default function ProjectsPage() {
             {/* Form */}
             <form onSubmit={handleUploadSubmit} className="p-6 space-y-5">
               {uploadError && (
-                <div className="bg-red-500/10 border border-red-500/20 rounded-xl p-3 flex items-center gap-2.5 text-xs text-red-400">
+                <div
+                  className={`rounded-xl p-3 flex items-center gap-2.5 text-xs ${
+                    uploadError.includes('retrying')
+                      ? 'bg-amber-500/10 border border-amber-500/20 text-amber-400'
+                      : 'bg-red-500/10 border border-red-500/20 text-red-400'
+                  }`}
+                >
                   <AlertCircle className="w-4 h-4 shrink-0" />
                   <p>{uploadError}</p>
                 </div>
@@ -420,25 +484,6 @@ export default function ProjectsPage() {
                   disabled={uploading}
                   className="w-full bg-[#070913] border border-slate-900 rounded-xl px-4 py-2.5 text-sm text-white placeholder-slate-600 focus:outline-none focus:border-indigo-600 transition-colors"
                 />
-              </div>
-
-              <div className="space-y-1.5">
-                <label className="text-xs font-semibold text-slate-300">
-                  Unreal Engine Version
-                </label>
-                <select
-                  value={projVersion}
-                  onChange={(e) => setProjVersion(e.target.value)}
-                  disabled={uploading}
-                  className="w-full bg-[#070913] border border-slate-900 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-600 transition-colors"
-                >
-                  <option value="UE 5.4">Unreal Engine 5.4</option>
-                  <option value="UE 5.3">Unreal Engine 5.3</option>
-                  <option value="UE 5.2">Unreal Engine 5.2</option>
-                  <option value="UE 5.1">Unreal Engine 5.1</option>
-                  <option value="UE 5.0">Unreal Engine 5.0</option>
-                  <option value="UE 4.27">Unreal Engine 4.27</option>
-                </select>
               </div>
 
               <div className="space-y-1.5">

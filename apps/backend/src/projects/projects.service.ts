@@ -110,7 +110,7 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     }
   }
 
-  async create(file: Express.Multer.File, name: string, version: string, userId: string) {
+  async create(file: Express.Multer.File, name: string, userId: string) {
     if (!file) {
       throw new BadRequestException('Unreal Engine project ZIP file is required');
     }
@@ -131,13 +131,13 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       throw new BadRequestException('No uploaded file path or buffer found');
     }
 
-    // Save temporary record to DB
+    // Save temporary record to DB (version will be auto-detected after extraction)
     const shareSlug = Math.random().toString(36).substring(2, 10);
     const project = await this.prisma.project.create({
       data: {
         id: projectId,
         name,
-        version,
+        version: 'Detecting...',
         status: 'STOPPED',
         zipPath,
         extractedPath: projectDir,
@@ -186,6 +186,15 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       // Fix permissions on extracted files. ZIP/RAR archives often lose Unix permission bits,
       // so .sh launcher scripts and ELF binaries won't be executable after extraction.
       this.fixExtractedPermissions(projectDir);
+
+      // Auto-detect UE version from Engine/Build/Build.version
+      // At upload time we don't know the build root yet, so scan the extracted directory
+      const detectedVersion = this.detectUEVersion(projectDir);
+      this.logger.log(`Auto-detected engine version: ${detectedVersion}`);
+      await this.prisma.project.update({
+        where: { id: projectId },
+        data: { version: detectedVersion },
+      });
 
       // Search for executable
       this.logger.log(`Scanning extracted project for Unreal Engine executable...`);
@@ -1194,6 +1203,37 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       this.logger.warn(`Failed to read Build.version at ${versionPath}: ${err.message}`);
     }
     return null;
+  }
+
+  // Auto-detect UE version at upload time by scanning for Engine/Build/Build.version.
+  // At upload time we don't know the build root, so we walk subdirectories looking for it.
+  // Returns a string like "UE 5.6" or "Unknown" if detection fails.
+  private detectUEVersion(dir: string): string {
+    // Try the direct path first (dir might already be the build root)
+    const direct = this.readBuildVersion(dir);
+    if (direct) return `UE ${direct.major}.${direct.minor}`;
+
+    // Walk one level of subdirectories to find Engine/Build/Build.version
+    try {
+      const entries = fs.readdirSync(dir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        if (entry.name === 'Engine') {
+          // Found Engine/ at this level — Build.version should be right here
+          const ver = this.readBuildVersion(dir);
+          if (ver) return `UE ${ver.major}.${ver.minor}`;
+        }
+        // Check one level deeper
+        const subDir = path.join(dir, entry.name);
+        const subVer = this.readBuildVersion(subDir);
+        if (subVer) return `UE ${subVer.major}.${subVer.minor}`;
+      }
+    } catch {
+      // Ignore scan errors
+    }
+
+    this.logger.warn(`Could not auto-detect UE version from ${dir}`);
+    return 'Unknown';
   }
 
   // Return the correct PixelStreaming connection flags for the given engine version.

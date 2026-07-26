@@ -73,21 +73,20 @@ export class ProjectsController {
   async uploadProject(
     @UploadedFile() file: Express.Multer.File,
     @Body('name') name: string,
-    @Body('version') version: string,
     @GetUser() user: UserDto,
   ) {
     if (!file) {
       throw new BadRequestException('Unreal Engine project ZIP or RAR file is required');
     }
-    if (!name || !version) {
+    if (!name) {
       if (file.path && fs.existsSync(file.path)) {
         try {
           fs.unlinkSync(file.path);
         } catch {}
       }
-      throw new BadRequestException('Project name and engine version are required');
+      throw new BadRequestException('Project name is required');
     }
-    return this.projectsService.create(file, name, version, user.id);
+    return this.projectsService.create(file, name, user.id);
   }
 
   @Get()
