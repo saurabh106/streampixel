@@ -872,9 +872,9 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     // Audio/platform flags — -RenderOffscreen is mandatory for headless server rendering
     // -vulkan -SM5 -FeatureLevelSM5: Forces Shader Model 5 feature level at runtime,
     // allowing Mesa lavapipe software Vulkan to run on CPU EC2 without requiring SM6 hardware extensions.
-    // -log: forces UE to write a log file under Saved/Logs/ for crash diagnostics.
+    // Audio/platform flags — -log forces UE to write a log file under Saved/Logs/ for crash diagnostics.
     const platformArgs = this.isLinux
-      ? ['-RenderOffscreen', '-vulkan', '-SM5', '-FeatureLevelSM5', '-nosound', '-log']
+      ? ['-log']
       : ['-RenderOffscreen', '-AudioMixer', '-Windowed', '-log'];
 
     const ueArgs = [
