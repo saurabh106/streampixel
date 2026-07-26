@@ -1985,30 +1985,27 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     } catch {}
 
     // Auto-detect the Vulkan ICD (Installable Client Driver) path.
-    // The hardcoded path may not exist on all distros — find the lavapipe ICD dynamically.
-    let vkIcdPath = process.env.VK_ICD_FILENAMES || '/usr/share/vulkan/icd.d/lvp_icd.x86_64.json';
-    if (!fs.existsSync(vkIcdPath)) {
-      try {
-        const icdDir = '/usr/share/vulkan/icd.d';
-        if (fs.existsSync(icdDir)) {
-          const icdFiles = fs
-            .readdirSync(icdDir)
-            .filter((f) => f.includes('lvp') && f.endsWith('.json'));
-          if (icdFiles.length > 0) {
-            vkIcdPath = path.join(icdDir, icdFiles[0]);
-            this.logger.log(`Auto-detected Vulkan ICD: ${vkIcdPath}`);
-          } else {
-            // Try any swrast or llvmpipe ICD
-            const anyIcd = fs.readdirSync(icdDir).filter((f) => f.endsWith('.json'));
-            if (anyIcd.length > 0) {
-              vkIcdPath = path.join(icdDir, anyIcd[0]);
-              this.logger.log(`Using fallback Vulkan ICD: ${vkIcdPath}`);
-            }
-          }
+    // Prefers SwiftShader, then lavapipe (lvp), then any available Vulkan ICD.
+    let vkIcdPath = process.env.VK_ICD_FILENAMES || '/usr/share/vulkan/icd.d/vk_swiftshader_icd.json';
+    try {
+      const icdDir = '/usr/share/vulkan/icd.d';
+      if (fs.existsSync(icdDir)) {
+        const icdFiles = fs.readdirSync(icdDir).filter((f) => f.endsWith('.json'));
+        const swift = icdFiles.find((f) => f.includes('swift'));
+        const lvp = icdFiles.find((f) => f.includes('lvp'));
+        if (swift) {
+          vkIcdPath = path.join(icdDir, swift);
+          this.logger.log(`Auto-detected SwiftShader Vulkan ICD: ${vkIcdPath}`);
+        } else if (lvp) {
+          vkIcdPath = path.join(icdDir, lvp);
+          this.logger.log(`Auto-detected lavapipe Vulkan ICD: ${vkIcdPath}`);
+        } else if (icdFiles.length > 0) {
+          vkIcdPath = path.join(icdDir, icdFiles[0]);
+          this.logger.log(`Using fallback Vulkan ICD: ${vkIcdPath}`);
         }
-      } catch {
-        this.logger.warn(`Could not auto-detect Vulkan ICD, using default: ${vkIcdPath}`);
       }
+    } catch {
+      this.logger.warn(`Could not auto-detect Vulkan ICD, using default: ${vkIcdPath}`);
     }
 
     const env: Record<string, string> = {

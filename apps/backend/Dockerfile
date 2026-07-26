@@ -51,20 +51,22 @@ RUN echo "deb http://deb.debian.org/debian sid main" > /etc/apt/sources.list.d/s
     apt-get update && apt-get install -y -t sid --no-install-recommends \
     libvulkan1 vulkan-tools \
     mesa-vulkan-drivers \
+    swiftshader || true && \
+    apt-get install -y -t sid --no-install-recommends \
     libgl1 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 \
     libglapi-mesa libgbm1 libdrm2 \
     libstdc++6 \
     && rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/sid.list
 
-# Verify Vulkan ICD was installed
-RUN VK_ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' 2>/dev/null | head -1) && \
+# Verify Vulkan ICD was installed (SwiftShader or Mesa lavapipe)
+RUN VK_ICD=$(find /usr/share/vulkan/icd.d -name '*.json' 2>/dev/null | head -1) && \
     if [ -n "$VK_ICD" ]; then echo "Vulkan ICD found: $VK_ICD"; else echo "WARNING: Vulkan ICD not found!"; fi
 
-ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/vk_swiftshader_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json:/usr/share/vulkan/icd.d/lvp_icd.json
+ENV VK_DRIVER_FILES=/usr/share/vulkan/icd.d/vk_swiftshader_icd.json:/usr/share/vulkan/icd.d/lvp_icd.x86_64.json:/usr/share/vulkan/icd.d/lvp_icd.json
 ENV XDG_RUNTIME_DIR=/tmp/runtime-root
 ENV GALLIUM_DRIVER=llvmpipe
 ENV MESA_GL_VERSION_OVERRIDE=4.5
-ENV RADV_PERFTEST=gpl
 ENV MESA_LOADER_DRIVER_OVERRIDE=lvp
 RUN mkdir -p /tmp/runtime-root && chmod 1777 /tmp/runtime-root
 RUN mkdir -p /opt/streampixel/storage/projects /opt/streampixel/storage/tmp && \
