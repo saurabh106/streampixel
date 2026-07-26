@@ -822,14 +822,37 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     if (launcherScript && this.isLinux) {
       try {
         fs.chmodSync(launcherScript, 0o755);
-        this.logger.log(`Ensured execute permission on launcher script: ${launcherScript}`);
+        this.logger.log(`[Launcher] Ensured execute permission: ${launcherScript}`);
+        // Log the script content for debugging
+        try {
+          const scriptContent = fs.readFileSync(launcherScript, 'utf-8');
+          this.logger.log(`[Launcher] Script content:\n${scriptContent}`);
+        } catch {}
       } catch {
         // Non-fatal — the spawn will fail with a clear error if the script isn't executable
       }
     }
 
     // Build the PixelStreaming connection flags — version-aware (UE 5.5+ vs earlier)
-    const version = this.readBuildVersion(ueCwd);
+    // Try reading Build.version from disk first, fall back to the version stored in the DB at upload time.
+    // This is critical because readBuildVersion may fail if the build root is misdetected.
+    const diskVersion = this.readBuildVersion(ueCwd);
+    const dbVersionStr = project.version; // e.g. "UE 5.6" or "Unknown"
+    let version = diskVersion;
+    if (!version && dbVersionStr && dbVersionStr.startsWith('UE ')) {
+      const parts = dbVersionStr.replace('UE ', '').split('.');
+      const major = parseInt(parts[0], 10);
+      const minor = parseInt(parts[1], 10);
+      if (!isNaN(major)) {
+        version = { major, minor: isNaN(minor) ? 0 : minor };
+        this.logger.log(
+          `[Version] Using DB-stored version as fallback: ${dbVersionStr} (major=${major}, minor=${version.minor})`,
+        );
+      }
+    }
+    this.logger.log(
+      `[Version] diskVersion=${diskVersion ? `UE ${diskVersion.major}.${diskVersion.minor}` : 'null'} dbVersion="${dbVersionStr}" resolved=${version ? `UE ${version.major}.${version.minor}` : 'null'}`,
+    );
     const pixelStreamingArgs = this.getPixelStreamingArgs(streamerPort, version);
 
     // Encoder tuning flags
@@ -943,6 +966,35 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       ueProcess.on('exit', (code: number | null, signal: string | null) => {
         const exitReason = `UE process exited with code=${code}, signal=${signal}`;
         this.logger.error(`[UE-PID ${ueProcess.pid}] ${exitReason}. Marking instance as ERROR.`);
+
+        // Attempt to read the UE log file for crash diagnostics
+        // UE writes to Saved/Logs/<ProjectName>.log when -log flag is passed
+        try {
+          const savedLogsDir = path.join(ueCwd, 'Saved', 'Logs');
+          if (fs.existsSync(savedLogsDir)) {
+            const logFiles = fs.readdirSync(savedLogsDir)
+              .filter(f => f.endsWith('.log'))
+              .sort((a, b) => {
+                const statA = fs.statSync(path.join(savedLogsDir, a));
+                const statB = fs.statSync(path.join(savedLogsDir, b));
+                return statB.mtimeMs - statA.mtimeMs;
+              });
+            if (logFiles.length > 0) {
+              const latestLog = path.join(savedLogsDir, logFiles[0]);
+              const logContent = fs.readFileSync(latestLog, 'utf-8');
+              // Log the last 50 lines which contain the crash info
+              const lines = logContent.split('\n');
+              const lastLines = lines.slice(-50).join('\n');
+              this.logger.error(
+                `[UE-PID ${ueProcess.pid}] === UE LOG FILE (${latestLog}) — last 50 lines ===\n${lastLines}\n[UE-PID ${ueProcess.pid}] === END UE LOG ===`,
+              );
+            } else {
+              this.logger.warn(`[UE-PID ${ueProcess.pid}] No .log files found in ${savedLogsDir}`);
+            }
+          }
+        } catch (logErr: any) {
+          this.logger.warn(`[UE-PID ${ueProcess.pid}] Failed to read UE log: ${logErr.message}`);
+        }
 
         const proc = this.activeProcesses.get(project.id);
         if (proc) {
@@ -1390,19 +1442,24 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   // Returns { major, minor } or null if the file is missing/unreadable.
   private readBuildVersion(buildRoot: string): { major: number; minor: number } | null {
     const versionPath = path.join(buildRoot, 'Engine', 'Build', 'Build.version');
+    this.logger.log(`[Version] Reading Build.version from: ${versionPath}`);
     try {
       if (fs.existsSync(versionPath)) {
-        const version = JSON.parse(fs.readFileSync(versionPath, 'utf-8'));
+        const raw = fs.readFileSync(versionPath, 'utf-8');
+        this.logger.log(`[Version] Build.version content: ${raw.trim()}`);
+        const version = JSON.parse(raw);
         const major = version.MajorVersion ?? 0;
         const minor = version.MinorVersion ?? 0;
         this.logger.log(
-          `Engine version: UE ${major}.${minor} ` +
+          `[Version] Engine version: UE ${major}.${minor} ` +
             `(MajorVersion=${major}, MinorVersion=${minor})`,
         );
         return { major, minor };
+      } else {
+        this.logger.warn(`[Version] Build.version NOT FOUND at ${versionPath}`);
       }
     } catch (err: any) {
-      this.logger.warn(`Failed to read Build.version at ${versionPath}: ${err.message}`);
+      this.logger.warn(`[Version] Failed to read Build.version at ${versionPath}: ${err.message}`);
     }
     return null;
   }
@@ -1948,9 +2005,30 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   private startXvfb(): { display: string; process: any } | null {
     if (!this.isLinux) return null;
 
-    // Find an available display number (try :99, :98, :97, ...)
+    // Check if display :99 is already bound (e.g. from a previous instance or auto-restart)
     const displayNum = 99;
     const display = `:${displayNum}`;
+
+    // Check if something is already listening on this display
+    try {
+      const sock = require('net');
+      const lockPath = `/tmp/.X${displayNum}-lock`;
+      if (fs.existsSync(lockPath)) {
+        const pid = parseInt(fs.readFileSync(lockPath, 'utf-8').trim(), 10);
+        if (!isNaN(pid)) {
+          // Check if that PID is still alive
+          try {
+            process.kill(pid, 0); // signal 0 = check existence
+            this.logger.log(`[Xvfb] Display ${display} already in use by PID ${pid} — reusing`);
+            return { display, process: { pid, kill: () => {} } }; // dummy handle
+          } catch {
+            // PID is dead — stale lock file, clean it up
+            this.logger.log(`[Xvfb] Stale lock file for display ${display} (dead PID ${pid}), cleaning up`);
+            try { fs.unlinkSync(lockPath); } catch {}
+          }
+        }
+      }
+    } catch {}
 
     try {
       // Start Xvfb with a 1920x1080x24-bit color screen
@@ -1960,18 +2038,17 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       });
 
       xvfbProcess.on('error', (err: Error) => {
-        this.logger.error(`Xvfb process error: ${err.message}`);
+        this.logger.error(`[Xvfb] Process error: ${err.message}`);
       });
 
       xvfbProcess.on('exit', (code: number | null) => {
-        this.logger.warn(`Xvfb process exited with code ${code}`);
+        this.logger.warn(`[Xvfb] Process exited with code ${code}`);
       });
 
-      // Give Xvfb a moment to bind to the display
-      this.logger.log(`Xvfb started with PID ${xvfbProcess.pid} on display ${display}`);
+      this.logger.log(`[Xvfb] Started with PID ${xvfbProcess.pid} on display ${display}`);
       return { display, process: xvfbProcess };
     } catch (err: any) {
-      this.logger.error(`Failed to start Xvfb: ${err.message}`);
+      this.logger.error(`[Xvfb] Failed to start: ${err.message}`);
       return null;
     }
   }
