@@ -2,9 +2,11 @@
 #include <dlfcn.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 typedef int VkResult;
 typedef void* VkPhysicalDevice;
+typedef void (*PFN_vkVoidFunction)(void);
 
 typedef struct VkPhysicalDeviceLimits {
     char dummy[512];
@@ -100,11 +102,15 @@ typedef void (*fn_vkGetPhysicalDeviceProperties)(VkPhysicalDevice, VkPhysicalDev
 typedef void (*fn_vkGetPhysicalDeviceProperties2)(VkPhysicalDevice, VkPhysicalDeviceProperties2*);
 typedef void (*fn_vkGetPhysicalDeviceFeatures)(VkPhysicalDevice, VkPhysicalDeviceFeatures*);
 typedef void (*fn_vkGetPhysicalDeviceFeatures2)(VkPhysicalDevice, VkPhysicalDeviceFeatures2*);
+typedef PFN_vkVoidFunction (*fn_vkGetInstanceProcAddr)(void*, const char*);
+typedef PFN_vkVoidFunction (*fn_vkGetDeviceProcAddr)(void*, const char*);
 
 static fn_vkGetPhysicalDeviceProperties real_props1 = NULL;
 static fn_vkGetPhysicalDeviceProperties2 real_props2 = NULL;
 static fn_vkGetPhysicalDeviceFeatures real_feats1 = NULL;
 static fn_vkGetPhysicalDeviceFeatures2 real_feats2 = NULL;
+static fn_vkGetInstanceProcAddr real_getInstanceProcAddr = NULL;
+static fn_vkGetDeviceProcAddr real_getDeviceProcAddr = NULL;
 
 void vkGetPhysicalDeviceProperties(VkPhysicalDevice pd, VkPhysicalDeviceProperties* pProperties) {
     if (!real_props1) real_props1 = (fn_vkGetPhysicalDeviceProperties)dlsym(RTLD_NEXT, "vkGetPhysicalDeviceProperties");
@@ -154,4 +160,40 @@ void vkGetPhysicalDeviceFeatures2(VkPhysicalDevice pd, VkPhysicalDeviceFeatures2
 
 void vkGetPhysicalDeviceFeatures2KHR(VkPhysicalDevice pd, VkPhysicalDeviceFeatures2* pFeatures) {
     vkGetPhysicalDeviceFeatures2(pd, pFeatures);
+}
+
+PFN_vkVoidFunction vkGetInstanceProcAddr(void* instance, const char* pName) {
+    if (!real_getInstanceProcAddr) {
+        real_getInstanceProcAddr = (fn_vkGetInstanceProcAddr)dlsym(RTLD_NEXT, "vkGetInstanceProcAddr");
+    }
+    if (pName) {
+        if (strcmp(pName, "vkGetPhysicalDeviceProperties") == 0) return (PFN_vkVoidFunction)vkGetPhysicalDeviceProperties;
+        if (strcmp(pName, "vkGetPhysicalDeviceProperties2") == 0) return (PFN_vkVoidFunction)vkGetPhysicalDeviceProperties2;
+        if (strcmp(pName, "vkGetPhysicalDeviceProperties2KHR") == 0) return (PFN_vkVoidFunction)vkGetPhysicalDeviceProperties2KHR;
+        if (strcmp(pName, "vkGetPhysicalDeviceFeatures") == 0) return (PFN_vkVoidFunction)vkGetPhysicalDeviceFeatures;
+        if (strcmp(pName, "vkGetPhysicalDeviceFeatures2") == 0) return (PFN_vkVoidFunction)vkGetPhysicalDeviceFeatures2;
+        if (strcmp(pName, "vkGetPhysicalDeviceFeatures2KHR") == 0) return (PFN_vkVoidFunction)vkGetPhysicalDeviceFeatures2KHR;
+    }
+    if (real_getInstanceProcAddr) {
+        return real_getInstanceProcAddr(instance, pName);
+    }
+    return NULL;
+}
+
+PFN_vkVoidFunction vkGetDeviceProcAddr(void* device, const char* pName) {
+    if (!real_getDeviceProcAddr) {
+        real_getDeviceProcAddr = (fn_vkGetDeviceProcAddr)dlsym(RTLD_NEXT, "vkGetDeviceProcAddr");
+    }
+    if (pName) {
+        if (strcmp(pName, "vkGetPhysicalDeviceProperties") == 0) return (PFN_vkVoidFunction)vkGetPhysicalDeviceProperties;
+        if (strcmp(pName, "vkGetPhysicalDeviceProperties2") == 0) return (PFN_vkVoidFunction)vkGetPhysicalDeviceProperties2;
+        if (strcmp(pName, "vkGetPhysicalDeviceProperties2KHR") == 0) return (PFN_vkVoidFunction)vkGetPhysicalDeviceProperties2KHR;
+        if (strcmp(pName, "vkGetPhysicalDeviceFeatures") == 0) return (PFN_vkVoidFunction)vkGetPhysicalDeviceFeatures;
+        if (strcmp(pName, "vkGetPhysicalDeviceFeatures2") == 0) return (PFN_vkVoidFunction)vkGetPhysicalDeviceFeatures2;
+        if (strcmp(pName, "vkGetPhysicalDeviceFeatures2KHR") == 0) return (PFN_vkVoidFunction)vkGetPhysicalDeviceFeatures2KHR;
+    }
+    if (real_getDeviceProcAddr) {
+        return real_getDeviceProcAddr(device, pName);
+    }
+    return NULL;
 }
