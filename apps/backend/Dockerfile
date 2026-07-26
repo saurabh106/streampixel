@@ -18,6 +18,7 @@ WORKDIR /app
 COPY package*.json ./
 COPY tsconfig*.json ./
 COPY packages/shared/package*.json ./packages/shared/
+COPY apps/backend/src/projects/signaling/package*.json ./apps/backend/src/projects/signaling/
 RUN npm install
 COPY packages/shared ./packages/shared/
 RUN npm run build --workspace=packages/shared
