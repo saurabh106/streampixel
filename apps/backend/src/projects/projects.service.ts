@@ -870,11 +870,11 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     const resolutionArgs = ['-ForceRes', '-ResX=1920', '-ResY=1080'];
 
     // Audio/platform flags — -RenderOffscreen is mandatory for headless server rendering
-    // -vulkan: UE 5.6+ requires Vulkan (OpenGL is deprecated). Mesa's lavapipe provides
-    // software Vulkan via the VK_ICD_FILENAMES env var set in getUEEnvironment().
+    // -vulkan -SM5 -FeatureLevelSM5: Forces Shader Model 5 feature level at runtime,
+    // allowing Mesa lavapipe software Vulkan to run on CPU EC2 without requiring SM6 hardware extensions.
     // -log: forces UE to write a log file under Saved/Logs/ for crash diagnostics.
     const platformArgs = this.isLinux
-      ? ['-RenderOffscreen', '-vulkan', '-nosound', '-log']
+      ? ['-RenderOffscreen', '-vulkan', '-SM5', '-FeatureLevelSM5', '-nosound', '-log']
       : ['-RenderOffscreen', '-AudioMixer', '-Windowed', '-log'];
 
     const ueArgs = [
