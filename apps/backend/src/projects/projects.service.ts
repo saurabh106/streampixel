@@ -970,27 +970,16 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         // Attempt to read the UE log file for crash diagnostics
         // UE writes to Saved/Logs/<ProjectName>.log when -log flag is passed
         try {
-          const savedLogsDir = path.join(ueCwd, 'Saved', 'Logs');
-          if (fs.existsSync(savedLogsDir)) {
-            const logFiles = fs.readdirSync(savedLogsDir)
-              .filter(f => f.endsWith('.log'))
-              .sort((a, b) => {
-                const statA = fs.statSync(path.join(savedLogsDir, a));
-                const statB = fs.statSync(path.join(savedLogsDir, b));
-                return statB.mtimeMs - statA.mtimeMs;
-              });
-            if (logFiles.length > 0) {
-              const latestLog = path.join(savedLogsDir, logFiles[0]);
-              const logContent = fs.readFileSync(latestLog, 'utf-8');
-              // Log the last 50 lines which contain the crash info
-              const lines = logContent.split('\n');
-              const lastLines = lines.slice(-50).join('\n');
-              this.logger.error(
-                `[UE-PID ${ueProcess.pid}] === UE LOG FILE (${latestLog}) — last 50 lines ===\n${lastLines}\n[UE-PID ${ueProcess.pid}] === END UE LOG ===`,
-              );
-            } else {
-              this.logger.warn(`[UE-PID ${ueProcess.pid}] No .log files found in ${savedLogsDir}`);
-            }
+          const latestLog = this.findLatestLogFile(ueCwd);
+          if (latestLog && fs.existsSync(latestLog)) {
+            const logContent = fs.readFileSync(latestLog, 'utf-8');
+            const lines = logContent.split('\n');
+            const lastLines = lines.slice(-100).join('\n');
+            this.logger.error(
+              `[UE-PID ${ueProcess.pid}] === UE LOG FILE (${latestLog}) — last 100 lines ===\n${lastLines}\n[UE-PID ${ueProcess.pid}] === END UE LOG ===`,
+            );
+          } else {
+            this.logger.warn(`[UE-PID ${ueProcess.pid}] No .log files found under ${ueCwd}`);
           }
         } catch (logErr: any) {
           this.logger.warn(`[UE-PID ${ueProcess.pid}] Failed to read UE log: ${logErr.message}`);
@@ -1924,20 +1913,64 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     return null;
   }
 
-  // Create Required/Logs and Config directories inside the build root.
+  // Recursively find the most recently modified .log file under the target directory
+  private findLatestLogFile(dir: string): string | null {
+    let latestLogPath: string | null = null;
+    let latestMtime = 0;
+    const search = (currentDir: string, depth = 0) => {
+      if (depth > 5) return;
+      try {
+        const entries = fs.readdirSync(currentDir, { withFileTypes: true });
+        for (const entry of entries) {
+          const fullPath = path.join(currentDir, entry.name);
+          if (entry.isDirectory()) {
+            if (entry.name !== 'Paks' && entry.name !== 'node_modules' && !entry.name.startsWith('.')) {
+              search(fullPath, depth + 1);
+            }
+          } else if (entry.isFile() && entry.name.endsWith('.log')) {
+            const stat = fs.statSync(fullPath);
+            if (stat.mtimeMs > latestMtime) {
+              latestMtime = stat.mtimeMs;
+              latestLogPath = fullPath;
+            }
+          }
+        }
+      } catch {}
+    };
+    search(dir);
+    return latestLogPath;
+  }
+
+  // Create Required/Logs and Config directories inside the build root and subdirectories.
   // UE packaged builds need these directories to initialize properly — without them,
   // the engine may fail to create log files or read config during startup.
   private prepareUEDirectories(buildRoot: string): void {
-    const dirs = [
+    const targetDirs: string[] = [
       path.join(buildRoot, 'Saved', 'Logs'),
       path.join(buildRoot, 'Config'),
       path.join(buildRoot, 'Saved'),
     ];
-    for (const dir of dirs) {
+
+    // Find any subdirectories in buildRoot (e.g. ArchVizExplorer) and prepare their Saved/Logs and Config as well
+    try {
+      const entries = fs.readdirSync(buildRoot, { withFileTypes: true });
+      for (const entry of entries) {
+        if (entry.isDirectory() && entry.name !== 'Engine' && entry.name !== 'Saved' && entry.name !== 'Config') {
+          targetDirs.push(path.join(buildRoot, entry.name, 'Saved', 'Logs'));
+          targetDirs.push(path.join(buildRoot, entry.name, 'Config'));
+          targetDirs.push(path.join(buildRoot, entry.name, 'Saved'));
+        }
+      }
+    } catch {}
+
+    for (const dir of targetDirs) {
       try {
         if (!fs.existsSync(dir)) {
           fs.mkdirSync(dir, { recursive: true });
           this.logger.log(`Created UE directory: ${dir}`);
+        }
+        if (this.isLinux) {
+          try { fs.chmodSync(dir, 0o777); } catch {}
         }
       } catch (err: any) {
         this.logger.warn(`Failed to create directory ${dir}: ${err.message}`);
@@ -1951,6 +1984,14 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   // software rasterizer and where to find the Vulkan ICD (Installable Client Driver).
   private getUEEnvironment(display?: string): Record<string, string> {
     if (!this.isLinux) return {};
+
+    // Ensure /tmp/runtime-root exists with write permissions for XDG_RUNTIME_DIR
+    try {
+      if (!fs.existsSync('/tmp/runtime-root')) {
+        fs.mkdirSync('/tmp/runtime-root', { recursive: true });
+      }
+      fs.chmodSync('/tmp/runtime-root', 0o777);
+    } catch {}
 
     // Auto-detect the Vulkan ICD (Installable Client Driver) path.
     // The hardcoded path may not exist on all distros — find the lavapipe ICD dynamically.
