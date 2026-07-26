@@ -81,6 +81,8 @@ RUN npm install --omit=dev --ignore-scripts
 RUN npm rebuild bcrypt
 COPY --from=builder /app/packages/shared/dist ./packages/shared/dist
 COPY --from=builder /app/apps/backend/dist ./apps/backend/dist
+COPY --from=builder /app/apps/backend/prisma ./apps/backend/prisma
+COPY --from=builder /app/apps/backend/src/projects/signaling ./apps/backend/src/projects/signaling
 COPY apps/backend/src/projects/vulkan_spoof.c ./apps/backend/src/projects/vulkan_spoof.c
 RUN apt-get update && apt-get install -y --no-install-recommends gcc libc-dev && \
     gcc -shared -fPIC -O2 /app/apps/backend/src/projects/vulkan_spoof.c -o /usr/lib/libvulkan_spoof.so -ldl && \
