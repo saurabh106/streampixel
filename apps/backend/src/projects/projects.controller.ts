@@ -9,6 +9,7 @@ import {
   UseInterceptors,
   UploadedFile,
   BadRequestException,
+  Logger,
 } from '@nestjs/common';
 import { ProjectsService } from './projects.service';
 import { JwtAuthGuard } from '../common/guards/jwt-auth.guard';
@@ -25,6 +26,7 @@ import * as fs from 'fs';
 @UseGuards(JwtAuthGuard)
 @Controller('projects')
 export class ProjectsController {
+  private readonly logger = new Logger(ProjectsController.name);
   constructor(private projectsService: ProjectsService) {}
 
   @Post('upload')
@@ -86,6 +88,7 @@ export class ProjectsController {
       }
       throw new BadRequestException('Project name is required');
     }
+    this.logger.log(`[Upload] file=${file?.originalname} size=${file?.size} name="${name}" user=${user.id}`);
     return this.projectsService.create(file, name, user.id);
   }
 
@@ -98,6 +101,7 @@ export class ProjectsController {
     @Body('totalSize') totalSize: number,
     @GetUser() user: UserDto,
   ) {
+    this.logger.log(`[ChunkedUpload:Init] name="${name}" file="${fileName}" chunks=${totalChunks} size=${totalSize} user=${user.id}`);
     return this.projectsService.initUpload(name, fileName, totalChunks, totalSize, user.id);
   }
 
@@ -125,6 +129,7 @@ export class ProjectsController {
     if (isNaN(index)) {
       throw new BadRequestException('Invalid chunk index');
     }
+    this.logger.log(`[ChunkedUpload:Chunk] session=${sessionId} index=${index} chunkSize=${file.buffer.length} user=${user.id}`);
     return this.projectsService.uploadChunk(sessionId, index, file.buffer, user.id);
   }
 
@@ -137,6 +142,7 @@ export class ProjectsController {
     if (!sessionId) {
       throw new BadRequestException('Session ID is required');
     }
+    this.logger.log(`[ChunkedUpload:Complete] session=${sessionId} user=${user.id}`);
     return this.projectsService.completeUpload(sessionId, user.id);
   }
 
@@ -146,6 +152,7 @@ export class ProjectsController {
     @Param('sessionId') sessionId: string,
     @GetUser() user: UserDto,
   ) {
+    this.logger.log(`[ChunkedUpload:Status] session=${sessionId} user=${user.id}`);
     return this.projectsService.getUploadStatus(sessionId, user.id);
   }
 
@@ -164,30 +171,35 @@ export class ProjectsController {
   @Delete(':id')
   @ApiOperation({ summary: 'Delete an uploaded project' })
   async deleteProject(@Param('id') id: string, @GetUser() user: UserDto) {
+    this.logger.log(`[Delete] project=${id} user=${user.id}`);
     return this.projectsService.delete(id, user.id);
   }
 
   @Post(':id/start')
   @ApiOperation({ summary: 'Start a pixel streaming instance for this project' })
   async startInstance(@Param('id') id: string, @GetUser() user: UserDto) {
+    this.logger.log(`[Start] project=${id} user=${user.id}`);
     return this.projectsService.startInstance(id, user.id);
   }
 
   @Get(':id/health')
   @ApiOperation({ summary: 'Check health of the running instance for this project' })
   async getInstanceHealth(@Param('id') id: string, @GetUser() user: UserDto) {
+    this.logger.log(`[Health] project=${id} user=${user.id}`);
     return this.projectsService.getInstanceHealth(id, user.id);
   }
 
   @Post(':id/stop')
   @ApiOperation({ summary: 'Stop the running instance for this project' })
   async stopInstance(@Param('id') id: string, @GetUser() user: UserDto) {
+    this.logger.log(`[Stop] project=${id} user=${user.id}`);
     return this.projectsService.stopInstance(id, user.id);
   }
 
   @Post(':id/share-slug')
   @ApiOperation({ summary: 'Generate or get the public share slug for this project' })
   async generateShareSlug(@Param('id') id: string, @GetUser() user: UserDto) {
+    this.logger.log(`[ShareSlug] project=${id} user=${user.id}`);
     return this.projectsService.generateShareSlug(id, user.id);
   }
 }

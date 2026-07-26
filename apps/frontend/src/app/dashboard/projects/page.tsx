@@ -93,6 +93,9 @@ export default function ProjectsPage() {
       const file = e.target.files[0];
       setProjFile(file);
       setResumableSession(null);
+      console.log(
+        `[Upload] File selected: "${file.name}" (${(file.size / 1024 / 1024).toFixed(1)}MB, ${Math.ceil(file.size / CHUNK_SIZE)} chunks)`,
+      );
 
       // Check localStorage for a resumable session matching this file
       try {
@@ -106,13 +109,14 @@ export default function ProjectsPage() {
             session.uploadedChunks?.length > 0
           ) {
             setResumableSession(session);
-            console.log('[Projects] Found resumable session:', session.sessionId, `(${session.uploadedChunks.length}/${totalChunks} chunks done)`);
+            console.log('[Upload:Resume] Found resumable session:', session.sessionId, `(${session.uploadedChunks.length}/${totalChunks} chunks done)`);
           } else {
-            // Stale session — clean it up
+            console.log('[Upload:Resume] Stale session found, discarding');
             localStorage.removeItem('chunkedUploadSession');
           }
         }
       } catch {
+        console.log('[Upload:Resume] Corrupted session in localStorage, clearing');
         localStorage.removeItem('chunkedUploadSession');
       }
     }
@@ -148,6 +152,7 @@ export default function ProjectsPage() {
     chunk: Blob,
     fileName: string,
   ): Promise<any> => {
+    const chunkStartTime = Date.now();
     for (let attempt = 1; attempt <= CHUNK_RETRIES; attempt++) {
       try {
         const formData = new FormData();
@@ -159,14 +164,22 @@ export default function ProjectsPage() {
           headers: { 'Content-Type': 'multipart/form-data' },
           timeout: 120000, // 120s per chunk for slow connections
         });
+        const elapsed = Date.now() - chunkStartTime;
+        console.log(
+          `[Upload:Chunk] Chunk ${chunkIndex} OK (${(chunk.size / 1024 / 1024).toFixed(1)}MB in ${elapsed}ms, attempt ${attempt}/${CHUNK_RETRIES})`
+        );
         return result;
       } catch (err: any) {
+        const elapsed = Date.now() - chunkStartTime;
         if (isNetworkError(err) && attempt < CHUNK_RETRIES) {
           console.warn(
-            `[Projects] Chunk ${chunkIndex} upload attempt ${attempt} failed, retrying...`,
+            `[Upload:Chunk] Chunk ${chunkIndex} attempt ${attempt} FAILED after ${elapsed}ms: ${err.message || err.code}, retrying in ${RETRY_DELAY_MS * attempt}ms...`,
           );
           await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
         } else {
+          console.error(
+            `[Upload:Chunk] Chunk ${chunkIndex} FINAL FAILURE after ${elapsed}ms (attempt ${attempt}/${CHUNK_RETRIES}): ${err.message || err.code}`,
+          );
           throw err;
         }
       }
@@ -180,6 +193,7 @@ export default function ProjectsPage() {
       return;
     }
 
+    const uploadStartTime = Date.now();
     try {
       setUploading(true);
       setUploadError(null);
@@ -195,13 +209,13 @@ export default function ProjectsPage() {
         sessionId = resumableSession.sessionId;
         startChunk = resumableSession.uploadedChunks.length;
         console.log(
-          `[Projects] Resuming upload from chunk ${startChunk}/${totalChunks} (session: ${sessionId})`,
+          `[Upload] Resuming from chunk ${startChunk}/${totalChunks} (session: ${sessionId}, ${(projFile.size / 1024 / 1024).toFixed(1)}MB)`,
         );
         setUploadStatus(`Resuming from chunk ${startChunk + 1}/${totalChunks}...`);
         setUploadProgress(Math.round((startChunk / totalChunks) * 100));
       } else {
         // Initialize new chunked upload session
-        console.log('[Projects] Initializing chunked upload session...');
+        console.log(`[Upload] Initializing session: "${projName}" / "${projFile.name}" (${(projFile.size / 1024 / 1024).toFixed(1)}MB, ${totalChunks} chunks)`);
         const initResult: any = await api.post('/projects/upload/init', {
           name: projName,
           fileName: projFile.name,
@@ -209,7 +223,7 @@ export default function ProjectsPage() {
           totalSize: projFile.size,
         });
         sessionId = initResult.sessionId;
-        console.log('[Projects] Session created:', sessionId);
+        console.log('[Upload] Session created:', sessionId);
       }
 
       // Upload chunks sequentially
@@ -243,7 +257,8 @@ export default function ProjectsPage() {
           setUploadProgress(Math.round(((uploadedChunks.length) / totalChunks) * 100));
         } catch (err: any) {
           const msg = err.message || err.code || 'Network error';
-          console.error(`[Projects] Chunk ${i} failed after ${CHUNK_RETRIES} attempts:`, msg);
+          const elapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
+          console.error(`[Upload] Chunk ${i} FAILED after ${elapsed}s total:`, msg);
 
           // Save progress so user can resume later
           const sessionData = {
@@ -258,7 +273,7 @@ export default function ProjectsPage() {
 
           setUploadError(
             `Network error on chunk ${i + 1}/${totalChunks}: ${msg}. ` +
-            `Progress saved — you can resume later by selecting the same file.`,
+            `Progress saved (${uploadedChunks.length}/${totalChunks} chunks) — you can resume later by selecting the same file.`,
           );
           setUploading(false);
           return; // Exit but progress is saved
@@ -269,10 +284,13 @@ export default function ProjectsPage() {
       setUploadStatus('All chunks uploaded. Assembling and extracting...');
       setUploadProgress(100);
 
-      console.log('[Projects] All chunks uploaded, completing upload...');
+      const completeStartTime = Date.now();
+      console.log(`[Upload] All ${totalChunks} chunks uploaded. Calling complete...`);
       await api.post('/projects/upload/complete', { sessionId });
 
-      console.log('[Projects] Upload complete, refreshing project list');
+      const totalElapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
+      const assembleElapsed = ((Date.now() - completeStartTime) / 1000).toFixed(1);
+      console.log(`[Upload] Complete. Assembly took ${assembleElapsed}s. Total upload: ${totalElapsed}s`);
       clearResumableSession();
       setProjName('');
       setProjFile(null);
@@ -282,7 +300,8 @@ export default function ProjectsPage() {
       fetchProjects();
     } catch (err: any) {
       const msg = err.message || err.code || 'Failed to upload project archive';
-      console.error('[Projects] Upload failed:', msg);
+      const elapsed = ((Date.now() - uploadStartTime) / 1000).toFixed(1);
+      console.error(`[Upload] Upload failed after ${elapsed}s:`, msg);
       setUploadError(
         `Upload error: ${msg}. Progress may be saved — try selecting the same file to resume.`,
       );
@@ -296,11 +315,12 @@ export default function ProjectsPage() {
       console.log('[Projects] Starting instance for project:', id);
       // Optimistic update
       setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, status: 'RUNNING' } : p)));
-      await api.post(`/projects/${id}/start`);
-      console.log('[Projects] Instance started, redirecting to stream page');
+      const result: any = await api.post(`/projects/${id}/start`);
+      console.log('[Projects] Instance started, redirecting to stream page', result?.port ? `(port ${result.port})` : '');
       // Redirect to streaming page
       router.push(`/dashboard/projects/${id}/stream`);
     } catch (err: any) {
+      console.error('[Projects] Start instance failed:', err.message || err.code);
       alert(`Error starting instance: ${err.message}`);
       fetchProjects();
     }
@@ -311,8 +331,10 @@ export default function ProjectsPage() {
       console.log('[Projects] Stopping instance for project:', id);
       setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, status: 'STOPPED' } : p)));
       await api.post(`/projects/${id}/stop`);
+      console.log('[Projects] Instance stopped successfully');
       fetchProjects();
     } catch (err: any) {
+      console.error('[Projects] Stop instance failed:', err.message || err.code);
       alert(`Error stopping instance: ${err.message}`);
       fetchProjects();
     }

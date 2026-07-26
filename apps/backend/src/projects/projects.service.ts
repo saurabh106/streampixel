@@ -234,14 +234,15 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
         );
       }
     } catch (error) {
-      this.logger.error(`Failed to extract or scan archive for ${projectId}: ${error.message}`);
+      this.logger.error(`[Upload:Extract] Failed to extract/scan archive for ${projectId}: ${error.message}`);
       // Clean up failed extraction directory
       try {
         if (fs.existsSync(projectDir)) {
           fs.rmSync(projectDir, { recursive: true, force: true });
+          this.logger.log(`[Upload:Extract] Cleaned up failed extraction directory: ${projectDir}`);
         }
       } catch (cleanupErr) {
-        this.logger.error(`Failed to clean up failed extraction: ${cleanupErr.message}`);
+        this.logger.error(`[Upload:Extract] Failed to clean up extraction dir: ${cleanupErr.message}`);
       }
       throw new BadRequestException(
         `Failed to extract project archive: ${error.message}. Please ensure the file is a valid ZIP or RAR archive.`,
@@ -310,13 +311,16 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   ) {
     const session = this.uploadSessions.get(sessionId);
     if (!session) {
+      this.logger.warn(`[ChunkedUpload] Session not found or expired: ${sessionId}`);
       throw new BadRequestException('Upload session not found or expired. Please start a new upload.');
     }
     if (session.userId !== userId) {
+      this.logger.warn(`[ChunkedUpload] Unauthorized chunk upload: session=${sessionId} user=${userId} owner=${session.userId}`);
       throw new BadRequestException('Unauthorized');
     }
 
     if (chunkIndex < 0 || chunkIndex >= session.totalChunks) {
+      this.logger.warn(`[ChunkedUpload] Invalid chunk index ${chunkIndex} (total: ${session.totalChunks}) session=${sessionId}`);
       throw new BadRequestException(`Invalid chunk index ${chunkIndex} (total: ${session.totalChunks})`);
     }
 
@@ -324,8 +328,8 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     fs.writeFileSync(chunkPath, chunkBuffer);
     session.uploadedChunks.add(chunkIndex);
 
-    this.logger.debug(
-      `Chunk ${chunkIndex + 1}/${session.totalChunks} received for session ${sessionId}`,
+    this.logger.log(
+      `[ChunkedUpload] Chunk ${chunkIndex + 1}/${session.totalChunks} saved (${chunkBuffer.length} bytes) session=${sessionId} progress=${((session.uploadedChunks.size / session.totalChunks) * 100).toFixed(1)}%`,
     );
 
     return {
@@ -339,9 +343,11 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   async completeUpload(sessionId: string, userId: string) {
     const session = this.uploadSessions.get(sessionId);
     if (!session) {
+      this.logger.warn(`[ChunkedUpload:Complete] Session not found or expired: ${sessionId}`);
       throw new BadRequestException('Upload session not found or expired. Please start a new upload.');
     }
     if (session.userId !== userId) {
+      this.logger.warn(`[ChunkedUpload:Complete] Unauthorized: session=${sessionId} user=${userId} owner=${session.userId}`);
       throw new BadRequestException('Unauthorized');
     }
 
@@ -350,12 +356,13 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
       for (let i = 0; i < session.totalChunks; i++) {
         if (!session.uploadedChunks.has(i)) missing.push(i);
       }
+      this.logger.error(`[ChunkedUpload:Complete] Incomplete upload: ${session.uploadedChunks.size}/${session.totalChunks} chunks. Missing: [${missing.join(', ')}]`);
       throw new BadRequestException(
         `Upload incomplete: ${session.uploadedChunks.size}/${session.totalChunks} chunks received. Missing chunks: ${missing.join(', ')}`,
       );
     }
 
-    this.logger.log(`Assembling ${session.totalChunks} chunks for session ${sessionId}...`);
+    this.logger.log(`[ChunkedUpload:Complete] Assembling ${session.totalChunks} chunks (${(session.totalSize / 1024 / 1024).toFixed(1)}MB) for session ${sessionId}...`);
 
     // Assemble chunks into the final file
     const assembledPath = path.join(session.chunksDir, session.fileName);
@@ -374,16 +381,19 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     });
 
     this.logger.log(
-      `Assembly complete: ${assembledPath} (${(session.totalSize / 1024 / 1024).toFixed(1)}MB)`,
+      `[ChunkedUpload:Complete] Assembly complete: ${assembledPath} (${(session.totalSize / 1024 / 1024).toFixed(1)}MB)`,
     );
 
     // Clean up individual chunk files
+    let cleanedChunks = 0;
     for (let i = 0; i < session.totalChunks; i++) {
       const chunkPath = path.join(session.chunksDir, `chunk_${i}`);
       try {
         fs.unlinkSync(chunkPath);
+        cleanedChunks++;
       } catch {}
     }
+    this.logger.log(`[ChunkedUpload:Complete] Cleaned up ${cleanedChunks}/${session.totalChunks} chunk files`);
 
     // Build a fake Multer file object to pass to the existing create() method
     const fakeFile = {
@@ -409,11 +419,14 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   getUploadStatus(sessionId: string, userId: string) {
     const session = this.uploadSessions.get(sessionId);
     if (!session) {
+      this.logger.debug(`[ChunkedUpload:Status] Session not found: ${sessionId}`);
       return { exists: false };
     }
     if (session.userId !== userId) {
+      this.logger.warn(`[ChunkedUpload:Status] Unauthorized: session=${sessionId} user=${userId}`);
       throw new BadRequestException('Unauthorized');
     }
+    this.logger.log(`[ChunkedUpload:Status] session=${sessionId} received=${session.uploadedChunks.size}/${session.totalChunks} (${((session.uploadedChunks.size / session.totalChunks) * 100).toFixed(1)}%)`);
     return {
       exists: true,
       sessionId: session.sessionId,

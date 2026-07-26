@@ -29,30 +29,31 @@ RUN cd apps/backend && npx prisma generate && npm run build
 
 FROM node:20-slim AS production
 
-# Use Debian sid (rolling) for all graphics/Vulkan/Mesa packages.
-# Debian bookworm ships Mesa 22.3 which is too old for UE 5.5+.
-# Sid always has the latest Mesa (25.x), Vulkan 1.4, and all GPU drivers
-# so any UE version (5.4, 5.5, 5.6, future) works out of the box.
-RUN echo "deb http://deb.debian.org/debian sid main" > /etc/apt/sources.list.d/sid.list && \
-    apt-get update && apt-get install -y --no-install-recommends \
+# Step 1: Install all base packages from bookworm (stable) — guaranteed to resolve
+RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip curl ca-certificates \
-    # Vulkan
-    libvulkan1 vulkan-tools mesa-vulkan-drivers \
-    # Mesa OpenGL/EGL/GBM
-    libgl1 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 libglapi-mesa libgbm1 \
-    # X11 / display
-    xvfb xauth libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 \
-    libxinerama1 libxkbcommon0 libxfixes0 libxkbcommon-x11-0 \
-    # XCB
-    libxcb1 libxcb-keysyms1 libxcb-render0 libxcb-shape0 \
-    libxcb-randr0 libxcb-image0 libxcb-util1 libxcb-xfixes0 \
-    # DRM / EGL
-    libdrm2 libegl1 \
-    # System
+    xvfb xauth \
     xdg-utils xdg-user-dirs \
     libfontconfig1 libfreetype6 \
-    libnss3 libatk-bridge2.0-0 libgtk-3-0 libasound2 \
-    libsm6 libice6 libstdc++6 \
+    libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libxinerama1 \
+    libxkbcommon0 libxkbcommon-x11-0 \
+    libxcb1 libxcb-keysyms1 libxcb-render0 libxcb-shape0 \
+    libxcb-randr0 libxcb-image0 libxcb-util1 \
+    libdrm2 libegl1 \
+    libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2 \
+    libsm6 libice6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Step 2: Pull ONLY Mesa/Vulkan packages from Debian sid (rolling, latest).
+# These replace the old bookworm versions (Mesa 22.3) with latest (Mesa 25.x)
+# which supports Vulkan 1.3+ needed by UE 5.5, 5.6 and beyond.
+RUN echo "deb http://deb.debian.org/debian sid main" > /etc/apt/sources.list.d/sid.list && \
+    apt-get update && apt-get install -y -t sid --no-install-recommends \
+    libvulkan1 vulkan-tools \
+    mesa-vulkan-drivers \
+    libgl1 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 \
+    libglapi-mesa libgbm1 libdrm2 \
+    libstdc++6 \
     && rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/sid.list
 
 # Verify Vulkan ICD was installed
