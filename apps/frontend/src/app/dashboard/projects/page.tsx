@@ -34,6 +34,11 @@ export default function ProjectsPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<string>(''); // e.g. "Uploading chunk 5/120..."
+  const [resumableSession, setResumableSession] = useState<any>(null); // existing session to resume
+
+  const CHUNK_SIZE = 10 * 1024 * 1024; // 10MB per chunk
+  const CHUNK_RETRIES = 3;
 
   useEffect(() => {
     fetchProjects();
@@ -85,65 +90,86 @@ export default function ProjectsPage() {
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
-      setProjFile(e.target.files[0]);
+      const file = e.target.files[0];
+      setProjFile(file);
+      setResumableSession(null);
+
+      // Check localStorage for a resumable session matching this file
+      try {
+        const stored = localStorage.getItem('chunkedUploadSession');
+        if (stored) {
+          const session = JSON.parse(stored);
+          const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+          if (
+            session.fileName === file.name &&
+            session.totalChunks === totalChunks &&
+            session.uploadedChunks?.length > 0
+          ) {
+            setResumableSession(session);
+            console.log('[Projects] Found resumable session:', session.sessionId, `(${session.uploadedChunks.length}/${totalChunks} chunks done)`);
+          } else {
+            // Stale session — clean it up
+            localStorage.removeItem('chunkedUploadSession');
+          }
+        }
+      } catch {
+        localStorage.removeItem('chunkedUploadSession');
+      }
     }
+  };
+
+  const clearResumableSession = () => {
+    localStorage.removeItem('chunkedUploadSession');
+    setResumableSession(null);
   };
 
   const MAX_UPLOAD_RETRIES = 5;
   const RETRY_DELAY_MS = 2000;
 
-  const uploadWithRetry = async (
-    formData: FormData,
-    attempt: number,
+  const isNetworkError = (err: any): boolean => {
+    return (
+      !err.response ||
+      err.code === 'ERR_NETWORK' ||
+      err.code === 'ECONNRESET' ||
+      err.code === 'ETIMEDOUT' ||
+      err.message?.includes('Network') ||
+      err.message?.includes('network') ||
+      err.message?.includes('ECONNRESET') ||
+      err.message?.includes('ETIMEDOUT') ||
+      err.message?.includes('Failed to fetch') ||
+      err.message?.includes('Connection') ||
+      err.code === 'NETWORK_ERROR'
+    );
+  };
+
+  const uploadChunkWithRetry = async (
+    sessionId: string,
+    chunkIndex: number,
+    chunk: Blob,
+    fileName: string,
   ): Promise<any> => {
-    try {
-      console.log(
-        `[Projects] Upload attempt ${attempt}/${MAX_UPLOAD_RETRIES}`,
-      );
-      const result = await api.post('/projects/upload', formData, {
-        headers: {
-          'Content-Type': 'multipart/form-data',
-        },
-        timeout: 300000,
-        onUploadProgress: (progressEvent) => {
-          const total = progressEvent.total || projFile!.size;
-          const current = progressEvent.loaded;
-          const percent = Math.round((current * 100) / total);
-          setUploadProgress(percent);
-        },
-      });
-      return result;
-    } catch (err: any) {
-      const isNetworkError =
-        !err.response ||
-        err.code === 'ERR_NETWORK' ||
-        err.code === 'ECONNRESET' ||
-        err.code === 'ETIMEDOUT' ||
-        err.message?.includes('Network') ||
-        err.message?.includes('network') ||
-        err.message?.includes('ECONNRESET') ||
-        err.message?.includes('ETIMEDOUT') ||
-        err.message?.includes('Failed to fetch') ||
-        err.message?.includes('Connection') ||
-        err.code === 'NETWORK_ERROR';
+    for (let attempt = 1; attempt <= CHUNK_RETRIES; attempt++) {
+      try {
+        const formData = new FormData();
+        formData.append('chunk', chunk, fileName);
+        formData.append('sessionId', sessionId);
+        formData.append('chunkIndex', chunkIndex.toString());
 
-      console.error(
-        `[Projects] Upload attempt ${attempt} failed:`,
-        err.message,
-        'isNetworkError:',
-        isNetworkError,
-      );
-
-      if (isNetworkError && attempt < MAX_UPLOAD_RETRIES) {
-        setUploadError(
-          `Network error — retrying... (attempt ${attempt + 1}/${MAX_UPLOAD_RETRIES})`,
-        );
-        setUploadProgress(0);
-        await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
-        return uploadWithRetry(formData, attempt + 1);
+        const result = await api.post('/projects/upload/chunk', formData, {
+          headers: { 'Content-Type': 'multipart/form-data' },
+          timeout: 120000, // 120s per chunk for slow connections
+        });
+        return result;
+      } catch (err: any) {
+        if (isNetworkError(err) && attempt < CHUNK_RETRIES) {
+          console.warn(
+            `[Projects] Chunk ${chunkIndex} upload attempt ${attempt} failed, retrying...`,
+          );
+          await new Promise((r) => setTimeout(r, RETRY_DELAY_MS * attempt));
+        } else {
+          throw err;
+        }
       }
-
-      throw err;
     }
   };
 
@@ -158,33 +184,107 @@ export default function ProjectsPage() {
       setUploading(true);
       setUploadError(null);
       setUploadProgress(0);
+      setUploadStatus('Initializing upload...');
 
-      const formData = new FormData();
-      formData.append('file', projFile);
-      formData.append('name', projName);
+      const totalChunks = Math.ceil(projFile.size / CHUNK_SIZE);
+      let sessionId: string | null = null;
+      let startChunk = 0;
 
-      console.log(
-        '[Projects] Uploading project:',
-        projName,
-        'File:',
-        projFile.name,
-        'Size:',
-        (projFile.size / 1024 / 1024).toFixed(1) + 'MB',
-      );
+      // Resume from existing session if available
+      if (resumableSession) {
+        sessionId = resumableSession.sessionId;
+        startChunk = resumableSession.uploadedChunks.length;
+        console.log(
+          `[Projects] Resuming upload from chunk ${startChunk}/${totalChunks} (session: ${sessionId})`,
+        );
+        setUploadStatus(`Resuming from chunk ${startChunk + 1}/${totalChunks}...`);
+        setUploadProgress(Math.round((startChunk / totalChunks) * 100));
+      } else {
+        // Initialize new chunked upload session
+        console.log('[Projects] Initializing chunked upload session...');
+        const initResult: any = await api.post('/projects/upload/init', {
+          name: projName,
+          fileName: projFile.name,
+          totalChunks,
+          totalSize: projFile.size,
+        });
+        sessionId = initResult.sessionId;
+        console.log('[Projects] Session created:', sessionId);
+      }
 
-      await uploadWithRetry(formData, 1);
+      // Upload chunks sequentially
+      const uploadedChunks: number[] = resumableSession
+        ? [...resumableSession.uploadedChunks]
+        : [];
+
+      for (let i = startChunk; i < totalChunks; i++) {
+        const start = i * CHUNK_SIZE;
+        const end = Math.min(start + CHUNK_SIZE, projFile.size);
+        const chunk = projFile.slice(start, end);
+
+        setUploadStatus(`Uploading chunk ${i + 1}/${totalChunks}...`);
+        setUploadProgress(Math.round(((i) / totalChunks) * 100));
+
+        try {
+          const result = await uploadChunkWithRetry(sessionId!, i, chunk, projFile.name);
+          uploadedChunks.push(i);
+
+          // Persist progress to localStorage for resume after page reload
+          const sessionData = {
+            sessionId,
+            fileName: projFile.name,
+            projectName: projName,
+            totalChunks,
+            totalSize: projFile.size,
+            uploadedChunks,
+          };
+          localStorage.setItem('chunkedUploadSession', JSON.stringify(sessionData));
+
+          setUploadProgress(Math.round(((uploadedChunks.length) / totalChunks) * 100));
+        } catch (err: any) {
+          const msg = err.message || err.code || 'Network error';
+          console.error(`[Projects] Chunk ${i} failed after ${CHUNK_RETRIES} attempts:`, msg);
+
+          // Save progress so user can resume later
+          const sessionData = {
+            sessionId,
+            fileName: projFile.name,
+            projectName: projName,
+            totalChunks,
+            totalSize: projFile.size,
+            uploadedChunks,
+          };
+          localStorage.setItem('chunkedUploadSession', JSON.stringify(sessionData));
+
+          setUploadError(
+            `Network error on chunk ${i + 1}/${totalChunks}: ${msg}. ` +
+            `Progress saved — you can resume later by selecting the same file.`,
+          );
+          setUploading(false);
+          return; // Exit but progress is saved
+        }
+      }
+
+      // All chunks uploaded — assemble on server
+      setUploadStatus('All chunks uploaded. Assembling and extracting...');
+      setUploadProgress(100);
+
+      console.log('[Projects] All chunks uploaded, completing upload...');
+      await api.post('/projects/upload/complete', { sessionId });
 
       console.log('[Projects] Upload complete, refreshing project list');
+      clearResumableSession();
       setProjName('');
       setProjFile(null);
       setIsModalOpen(false);
       setUploadProgress(100);
+      setUploadStatus('');
       fetchProjects();
     } catch (err: any) {
       const msg = err.message || err.code || 'Failed to upload project archive';
-      console.error('[Projects] Upload failed after all retries:', msg);
+      console.error('[Projects] Upload failed:', msg);
       setUploadError(
-        `Network error: ${msg}. Please check your connection and try again.`,
+        `Upload error: ${msg}. Progress may be saved — try selecting the same file to resume.`,
       );
     } finally {
       setUploading(false);
@@ -450,10 +550,15 @@ export default function ProjectsPage() {
                   Package your build folder as a single ZIP or RAR archive to upload.
                 </p>
               </div>
-              <button
-                onClick={() => !uploading && setIsModalOpen(false)}
-                className="text-slate-400 hover:text-white p-1 hover:bg-white/5 rounded-lg transition-all"
-              >
+                <button
+                  onClick={() => {
+                    if (!uploading) {
+                      clearResumableSession();
+                      setIsModalOpen(false);
+                    }
+                  }}
+                  className="text-slate-400 hover:text-white p-1 hover:bg-white/5 rounded-lg transition-all"
+                >
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -463,13 +568,27 @@ export default function ProjectsPage() {
               {uploadError && (
                 <div
                   className={`rounded-xl p-3 flex items-center gap-2.5 text-xs ${
-                    uploadError.includes('retrying')
+                    uploadError.includes('Resuming') || uploadError.includes('retrying') || uploadError.includes('saved')
                       ? 'bg-amber-500/10 border border-amber-500/20 text-amber-400'
                       : 'bg-red-500/10 border border-red-500/20 text-red-400'
                   }`}
                 >
                   <AlertCircle className="w-4 h-4 shrink-0" />
                   <p>{uploadError}</p>
+                </div>
+              )}
+
+              {resumableSession && !uploading && (
+                <div className="rounded-xl p-3 flex items-center gap-2.5 text-xs bg-emerald-500/10 border border-emerald-500/20 text-emerald-400">
+                  <UploadCloud className="w-4 h-4 shrink-0" />
+                  <div>
+                    <p className="font-semibold">
+                      Resumable upload detected — {resumableSession.uploadedChunks.length}/{resumableSession.totalChunks} chunks already uploaded
+                    </p>
+                    <p className="text-emerald-400/70 mt-0.5">
+                      Click "Upload and Extract" to resume from where you left off.
+                    </p>
+                  </div>
                 </div>
               )}
 
@@ -514,7 +633,7 @@ export default function ProjectsPage() {
               {uploading && (
                 <div className="space-y-1.5 pt-2">
                   <div className="flex items-center justify-between text-xs font-semibold text-indigo-400">
-                    <span>Uploading build archive...</span>
+                    <span>{uploadStatus || 'Uploading...'}</span>
                     <span>{uploadProgress}%</span>
                   </div>
                   <div className="w-full bg-[#070913] h-2 rounded-full overflow-hidden border border-slate-900">
@@ -523,6 +642,9 @@ export default function ProjectsPage() {
                       style={{ width: `${uploadProgress}%` }}
                     />
                   </div>
+                  <p className="text-[10px] text-slate-500">
+                    Chunks upload individually — safe to resume if disconnected
+                  </p>
                 </div>
               )}
 
@@ -530,7 +652,10 @@ export default function ProjectsPage() {
               <div className="flex items-center justify-end gap-3 pt-4 border-t border-slate-900 mt-6">
                 <button
                   type="button"
-                  onClick={() => setIsModalOpen(false)}
+                  onClick={() => {
+                    clearResumableSession();
+                    setIsModalOpen(false);
+                  }}
                   disabled={uploading}
                   className="px-4 py-2 text-xs font-semibold text-slate-400 hover:text-white rounded-xl transition-all"
                 >

@@ -13,6 +13,18 @@ import { spawn, execSync } from 'child_process';
 import unzipper from 'unzipper';
 import { createExtractorFromFile } from 'node-unrar-js';
 
+interface UploadSession {
+  sessionId: string;
+  projectName: string;
+  fileName: string;
+  userId: string;
+  totalChunks: number;
+  totalSize: number;
+  uploadedChunks: Set<number>;
+  chunksDir: string;
+  createdAt: number;
+}
+
 @Injectable()
 export class ProjectsService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(ProjectsService.name);
@@ -41,6 +53,10 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     (process.platform === 'linux'
       ? '/opt/streampixel/storage'
       : path.resolve(process.cwd(), 'storage'));
+
+  // In-memory upload sessions for chunked upload with resume support.
+  // Sessions auto-expire after 24 hours. Backend restarts also clear them.
+  private uploadSessions = new Map<string, UploadSession>();
 
   constructor(private prisma: PrismaService) {}
 
@@ -235,6 +251,179 @@ export class ProjectsService implements OnModuleInit, OnModuleDestroy {
     return this.prisma.project.findUnique({
       where: { id: projectId },
     });
+  }
+
+  // ──────────────────────────────────────────────────────────────
+  //  Chunked upload with resume support
+  // ──────────────────────────────────────────────────────────────
+
+  async initUpload(
+    name: string,
+    fileName: string,
+    totalChunks: number,
+    totalSize: number,
+    userId: string,
+  ) {
+    if (!name) throw new BadRequestException('Project name is required');
+    if (!fileName) throw new BadRequestException('File name is required');
+    if (!totalChunks || totalChunks < 1) throw new BadRequestException('Invalid chunk count');
+
+    const sessionId = `chunk-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+    const chunksDir = path.join(this.storagePath, 'tmp', 'chunks', sessionId);
+    fs.mkdirSync(chunksDir, { recursive: true });
+
+    const session: UploadSession = {
+      sessionId,
+      projectName: name,
+      fileName,
+      userId,
+      totalChunks,
+      totalSize,
+      uploadedChunks: new Set<number>(),
+      chunksDir,
+      createdAt: Date.now(),
+    };
+    this.uploadSessions.set(sessionId, session);
+    this.logger.log(
+      `Upload session initialized: ${sessionId} — ${fileName} (${(totalSize / 1024 / 1024).toFixed(1)}MB, ${totalChunks} chunks)`,
+    );
+
+    // Auto-cleanup after 24 hours
+    setTimeout(() => {
+      if (this.uploadSessions.has(sessionId)) {
+        this.uploadSessions.delete(sessionId);
+        try {
+          fs.rmSync(chunksDir, { recursive: true, force: true });
+        } catch {}
+        this.logger.log(`Upload session ${sessionId} expired and cleaned up`);
+      }
+    }, 24 * 60 * 60 * 1000);
+
+    return { sessionId, totalChunks, totalSize };
+  }
+
+  async uploadChunk(
+    sessionId: string,
+    chunkIndex: number,
+    chunkBuffer: Buffer,
+    userId: string,
+  ) {
+    const session = this.uploadSessions.get(sessionId);
+    if (!session) {
+      throw new BadRequestException('Upload session not found or expired. Please start a new upload.');
+    }
+    if (session.userId !== userId) {
+      throw new BadRequestException('Unauthorized');
+    }
+
+    if (chunkIndex < 0 || chunkIndex >= session.totalChunks) {
+      throw new BadRequestException(`Invalid chunk index ${chunkIndex} (total: ${session.totalChunks})`);
+    }
+
+    const chunkPath = path.join(session.chunksDir, `chunk_${chunkIndex}`);
+    fs.writeFileSync(chunkPath, chunkBuffer);
+    session.uploadedChunks.add(chunkIndex);
+
+    this.logger.debug(
+      `Chunk ${chunkIndex + 1}/${session.totalChunks} received for session ${sessionId}`,
+    );
+
+    return {
+      received: session.uploadedChunks.size,
+      total: session.totalChunks,
+      sessionId,
+      complete: session.uploadedChunks.size === session.totalChunks,
+    };
+  }
+
+  async completeUpload(sessionId: string, userId: string) {
+    const session = this.uploadSessions.get(sessionId);
+    if (!session) {
+      throw new BadRequestException('Upload session not found or expired. Please start a new upload.');
+    }
+    if (session.userId !== userId) {
+      throw new BadRequestException('Unauthorized');
+    }
+
+    if (session.uploadedChunks.size !== session.totalChunks) {
+      const missing = [];
+      for (let i = 0; i < session.totalChunks; i++) {
+        if (!session.uploadedChunks.has(i)) missing.push(i);
+      }
+      throw new BadRequestException(
+        `Upload incomplete: ${session.uploadedChunks.size}/${session.totalChunks} chunks received. Missing chunks: ${missing.join(', ')}`,
+      );
+    }
+
+    this.logger.log(`Assembling ${session.totalChunks} chunks for session ${sessionId}...`);
+
+    // Assemble chunks into the final file
+    const assembledPath = path.join(session.chunksDir, session.fileName);
+    const writeStream = fs.createWriteStream(assembledPath);
+
+    for (let i = 0; i < session.totalChunks; i++) {
+      const chunkPath = path.join(session.chunksDir, `chunk_${i}`);
+      const data = fs.readFileSync(chunkPath);
+      writeStream.write(data);
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      writeStream.on('finish', resolve);
+      writeStream.on('error', reject);
+      writeStream.end();
+    });
+
+    this.logger.log(
+      `Assembly complete: ${assembledPath} (${(session.totalSize / 1024 / 1024).toFixed(1)}MB)`,
+    );
+
+    // Clean up individual chunk files
+    for (let i = 0; i < session.totalChunks; i++) {
+      const chunkPath = path.join(session.chunksDir, `chunk_${i}`);
+      try {
+        fs.unlinkSync(chunkPath);
+      } catch {}
+    }
+
+    // Build a fake Multer file object to pass to the existing create() method
+    const fakeFile = {
+      fieldname: 'file',
+      originalname: session.fileName,
+      encoding: '7bit',
+      mimetype: 'application/octet-stream',
+      size: session.totalSize,
+      destination: session.chunksDir,
+      filename: session.fileName,
+      path: assembledPath,
+      buffer: undefined,
+      stream: undefined,
+    } as unknown as Express.Multer.File;
+
+    // Clean up session
+    this.uploadSessions.delete(sessionId);
+
+    // Delegate to the existing create() method which handles extraction, permissions, etc.
+    return this.create(fakeFile, session.projectName, session.userId);
+  }
+
+  getUploadStatus(sessionId: string, userId: string) {
+    const session = this.uploadSessions.get(sessionId);
+    if (!session) {
+      return { exists: false };
+    }
+    if (session.userId !== userId) {
+      throw new BadRequestException('Unauthorized');
+    }
+    return {
+      exists: true,
+      sessionId: session.sessionId,
+      fileName: session.fileName,
+      projectName: session.projectName,
+      totalChunks: session.totalChunks,
+      totalSize: session.totalSize,
+      uploadedChunks: Array.from(session.uploadedChunks).sort((a, b) => a - b),
+      received: session.uploadedChunks.size,
+    };
   }
 
   private async generateUniqueShareSlug(): Promise<string> {

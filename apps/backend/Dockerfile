@@ -17,10 +17,13 @@ RUN apk add --no-cache git unzip curl
 WORKDIR /app
 COPY package*.json ./
 COPY tsconfig*.json ./
-COPY packages/shared ./packages/shared/
-COPY apps/backend ./apps/backend/
+COPY packages/shared/package*.json ./packages/shared/
 RUN npm install
+COPY packages/shared ./packages/shared/
 RUN npm run build --workspace=packages/shared
+COPY apps/backend/package*.json ./apps/backend/
+RUN npm install
+COPY apps/backend ./apps/backend/
 RUN cd apps/backend && npx prisma generate && npm run build
 
 FROM node:20-slim AS production

@@ -15,10 +15,13 @@ ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
 WORKDIR /app
 COPY package*.json ./
 COPY tsconfig*.json ./
-COPY packages/shared ./packages/shared/
-COPY apps/frontend ./apps/frontend/
+COPY packages/shared/package*.json ./packages/shared/
 RUN npm install
+COPY packages/shared ./packages/shared/
 RUN npm run build --workspace=packages/shared
+COPY apps/frontend/package*.json ./apps/frontend/
+RUN npm install
+COPY apps/frontend ./apps/frontend/
 RUN npm run build --workspace=apps/frontend
 
 FROM node:20-alpine AS production

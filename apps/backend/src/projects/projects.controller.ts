@@ -16,7 +16,7 @@ import { GetUser } from '../common/decorators/get-user.decorator';
 import { FileInterceptor } from '@nestjs/platform-express';
 import { ApiTags, ApiOperation, ApiConsumes, ApiBody, ApiBearerAuth } from '@nestjs/swagger';
 import { UserDto } from '../common/types/shared.types';
-import { diskStorage } from 'multer';
+import { diskStorage, memoryStorage } from 'multer';
 import * as path from 'path';
 import * as fs from 'fs';
 
@@ -87,6 +87,66 @@ export class ProjectsController {
       throw new BadRequestException('Project name is required');
     }
     return this.projectsService.create(file, name, user.id);
+  }
+
+  @Post('upload/init')
+  @ApiOperation({ summary: 'Initialize a chunked upload session' })
+  async initUpload(
+    @Body('name') name: string,
+    @Body('fileName') fileName: string,
+    @Body('totalChunks') totalChunks: number,
+    @Body('totalSize') totalSize: number,
+    @GetUser() user: UserDto,
+  ) {
+    return this.projectsService.initUpload(name, fileName, totalChunks, totalSize, user.id);
+  }
+
+  @Post('upload/chunk')
+  @ApiOperation({ summary: 'Upload a single chunk of a file' })
+  @UseInterceptors(
+    FileInterceptor('chunk', {
+      storage: memoryStorage(),
+      limits: { fileSize: 25 * 1024 * 1024 },
+    }),
+  )
+  async uploadChunk(
+    @UploadedFile() file: Express.Multer.File,
+    @Body('sessionId') sessionId: string,
+    @Body('chunkIndex') chunkIndex: string,
+    @GetUser() user: UserDto,
+  ) {
+    if (!file) {
+      throw new BadRequestException('Chunk data is required');
+    }
+    if (!sessionId) {
+      throw new BadRequestException('Session ID is required');
+    }
+    const index = parseInt(chunkIndex, 10);
+    if (isNaN(index)) {
+      throw new BadRequestException('Invalid chunk index');
+    }
+    return this.projectsService.uploadChunk(sessionId, index, file.buffer, user.id);
+  }
+
+  @Post('upload/complete')
+  @ApiOperation({ summary: 'Complete a chunked upload and process the file' })
+  async completeUpload(
+    @Body('sessionId') sessionId: string,
+    @GetUser() user: UserDto,
+  ) {
+    if (!sessionId) {
+      throw new BadRequestException('Session ID is required');
+    }
+    return this.projectsService.completeUpload(sessionId, user.id);
+  }
+
+  @Get('upload/status/:sessionId')
+  @ApiOperation({ summary: 'Get upload session status for resume' })
+  async getUploadStatus(
+    @Param('sessionId') sessionId: string,
+    @GetUser() user: UserDto,
+  ) {
+    return this.projectsService.getUploadStatus(sessionId, user.id);
   }
 
   @Get()
