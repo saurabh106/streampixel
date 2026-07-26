@@ -28,28 +28,43 @@ COPY apps/backend ./apps/backend/
 RUN cd apps/backend && npx prisma generate && npm run build
 
 FROM node:20-slim AS production
-RUN apt-get update && apt-get install -y --no-install-recommends \
+
+# Use Debian sid (rolling) for all graphics/Vulkan/Mesa packages.
+# Debian bookworm ships Mesa 22.3 which is too old for UE 5.5+.
+# Sid always has the latest Mesa (25.x), Vulkan 1.4, and all GPU drivers
+# so any UE version (5.4, 5.5, 5.6, future) works out of the box.
+RUN echo "deb http://deb.debian.org/debian sid main" > /etc/apt/sources.list.d/sid.list && \
+    apt-get update && apt-get install -y --no-install-recommends \
     unzip curl ca-certificates \
+    # Vulkan
     libvulkan1 vulkan-tools mesa-vulkan-drivers \
-    libgl1-mesa-dri libglx-mesa0 libegl-mesa0 libgl1 \
-    xvfb xauth \
+    # Mesa OpenGL/EGL/GBM
+    libgl1 libgl1-mesa-dri libglx-mesa0 libegl-mesa0 libglapi-mesa libgbm1 \
+    # X11 / display
+    xvfb xauth libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 \
+    libxinerama1 libxkbcommon0 libxfixes0 libxkbcommon-x11-0 \
+    # XCB
+    libxcb1 libxcb-keysyms1 libxcb-render0 libxcb-shape0 \
+    libxcb-randr0 libxcb-image0 libxcb-util1 libxcb-xfixes0 \
+    # DRM / EGL
+    libdrm2 libegl1 \
+    # System
     xdg-utils xdg-user-dirs \
-    libfontconfig1 libfreetype6 libx11-6 libxcursor1 libxrandr2 libxi6 \
-    libxinerama1 libxkbcommon0 libdrm2 libegl1 \
-    libnss3 libatk-bridge2.0-0 libgtk-3-0 libgbm1 libasound2 \
-    libx11-xcb1 libxcb1 libxcb-keysyms1 libxcb-render0 libxcb-shape0 \
-    libxcb-xfixes0 libxcb-randr0 libxcb-image0 libxcb-util1 \
-    libsm6 libice6 \
-    && rm -rf /var/lib/apt/lists/*
+    libfontconfig1 libfreetype6 \
+    libnss3 libatk-bridge2.0-0 libgtk-3-0 libasound2 \
+    libsm6 libice6 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/* /etc/apt/sources.list.d/sid.list
+
+# Verify Vulkan ICD was installed
 RUN VK_ICD=$(find /usr/share/vulkan/icd.d -name 'lvp_icd*.json' 2>/dev/null | head -1) && \
     if [ -n "$VK_ICD" ]; then echo "Vulkan ICD found: $VK_ICD"; else echo "WARNING: Vulkan ICD not found!"; fi
+
 ENV VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
 ENV XDG_RUNTIME_DIR=/tmp/runtime-root
 ENV GALLIUM_DRIVER=llvmpipe
 ENV MESA_GL_VERSION_OVERRIDE=4.5
 ENV RADV_PERFTEST=gpl
 ENV MESA_LOADER_DRIVER_OVERRIDE=lvp
-ENV MESA_VK_DEVICE_SELECT=list
 RUN mkdir -p /tmp/runtime-root && chmod 1777 /tmp/runtime-root
 RUN mkdir -p /opt/streampixel/storage/projects /opt/streampixel/storage/tmp && \
     chown -R node:node /opt/streampixel/storage && \
